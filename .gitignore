@@ -1,0 +1,83 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Locally cloned repositories used during analysis
+/backend/temp_repos/
+
+# Frontend dependencies and build output
+**/node_modules/
+**/dist/
+**/build/
+**/coverage/
+
+# Local logs and operating-system files
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db
+
+# Terraform state, plans, local providers, and variable files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+!*.example.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform-generated diagnostics and source bundles
+/infrastructure/terraform/.repoiq-source.zip
+/infrastructure/terraform/terraform.zip
+/infrastructure/terraform/builder-console.json
+/infrastructure/terraform/builder-console.txt
+/infrastructure/terraform/debug.json
+/infrastructure/terraform/ssm-test.json
+/infrastructure/terraform/stage-current.json
+/infrastructure/terraform/stage.json
+/infrastructure/terraform/status-response.json
+/infrastructure/terraform/CORRECTED_wait_for_builder_ready.py
+/infrastructure/terraform/FIXES_APPLIED.md
+
+# Bundled copies of the project
+/backend.zip
+/Frontend.zip
+/infrastructure.zip
+/repoiq-backend.tar.gz
+
+# Local Kubernetes secret containing development credentials
+/infrastructure/kubernetes/secret.yaml

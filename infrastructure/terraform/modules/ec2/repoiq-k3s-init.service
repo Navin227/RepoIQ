@@ -1,0 +1,26 @@
+[Unit]
+Description=RepoIQ demo K3s initialization (first boot + subsequent boot verification)
+Documentation=file:///usr/local/sbin/repoiq-k3s-init.sh
+Wants=network-online.target docker.service
+After=network-online.target docker.service systemd-journald.service
+Requires=docker.service
+StartLimitBurst=3
+StartLimitIntervalSec=1800
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/repoiq-k3s-init.sh
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=2400
+TimeoutStopSec=120
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+StandardOutput=journal+console
+StandardError=journal+console
+SyslogIdentifier=repoiq-k3s-init
+
+[Install]
+WantedBy=multi-user.target

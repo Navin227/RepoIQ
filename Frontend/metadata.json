@@ -1,0 +1,6 @@
+{
+  "name": "RepoIQ",
+  "description": "AI-powered repository intelligence platform that helps developers discover, analyze, understand, and compare GitHub repositories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

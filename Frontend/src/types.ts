@@ -1,0 +1,162 @@
+export type TechItem = string | {
+  name: string;
+  source?: string;
+  evidence?: string | string[];
+  confidence?: number;
+  count?: number;
+  sources?: string[];
+};
+
+export interface TechStack {
+  frontend: TechItem[];
+  backend: TechItem[];
+  database: TechItem[];
+  infrastructure: TechItem[];
+  devops: TechItem[];
+  cloud?: TechItem[];
+  messaging?: TechItem[];
+  monitoring?: TechItem[];
+  cicd?: TechItem[];
+  tooling?: TechItem[];
+}
+
+export interface FileTreeNode {
+  name: string;
+  type: "file" | "folder";
+  children?: FileTreeNode[];
+  size?: string;
+}
+
+export interface Repository {
+  owner: string;
+  name: string;
+  fullName: string;
+  description: string;
+  stars: number;
+  forks: number;
+  language: string;
+  topics: string[];
+  url: string;
+  localPath?: string;
+  readme?: string;
+  overview: {
+    aiSummary: string;
+    executiveOverview?: ExecutiveOverview;
+    info: {
+      license: string;
+      contributors: number;
+      openIssues: number;
+      lastCommit: string;
+    };
+    stats: {
+      linesOfCode: string;
+      filesCount: number;
+      commitsCount: string;
+      pullRequests: number;
+    };
+    topics: string[];
+  };
+  analysis: {
+    projectSummary: string;
+    techStack: TechStack;
+    keyFeatures: string[];
+    businessModules?: BusinessModule[];
+  };
+  folderStructure: FileTreeNode[];
+  similarRepos: SimilarRepo[];
+  languages?: string[];
+  rawStack?: any;
+  architecture?: ArchitectureAnalysis;
+  analysisEvidence?: Record<string, unknown>;
+}
+
+export interface ArchitectureComponent {
+  name: string;
+  responsibility: string;
+  connected_to: string[];
+}
+
+export interface ArchitectureAnalysis {
+  architecture_summary: string;
+  summary?: string;
+  architecture_type: string;
+  flow: string[];
+  request_lifecycle: string[];
+  components: ArchitectureComponent[];
+  communication: string[];
+  deployment: string;
+}
+
+export interface ExecutiveOverview {
+  what_is_this_project: string[];
+  why_was_it_built: string;
+  user_features: Array<{
+    name: string;
+    description: string;
+  }>;
+  typical_use_cases: string[];
+  who_is_this_for: string[];
+  why_is_it_valuable: string;
+  one_line_summary: string;
+}
+
+export interface BusinessModule {
+  name: string;
+  purpose: string;
+  description?: string;
+  capabilities: string[];
+  components: string[];
+  connected_modules: string[];
+  confidence: number;
+  evidence?: string[];
+}
+
+export interface SimilarRepo {
+  name?: string;
+  owner?: string;
+  fullName: string;
+  full_name?: string;
+  url?: string;
+  html_url?: string;
+  description: string;
+  stars: number;
+  forks: number;
+  language: string;
+  topics: string[];
+  similarity?: number;
+  similarity_breakdown?: Record<string, number>;
+  relevance_score?: number;
+  analyzability_score?: number;
+  ranking_score?: number;
+  reason?: string;
+  project_type?: string;
+  architecture?: string;
+  shared_technologies?: string[];
+  shared_modules?: string[];
+  badges?: string[];
+}
+
+export interface AnalysisResult {
+  status: "analyzing" | "success" | "error";
+  repoName?: string;
+  repoUrl?: string;
+  localPath?: string;
+  readme?: string;
+  stack?: {
+    categories?: any;
+    flat?: TechStack;
+  };
+  folderStructure?: FileTreeNode[];
+  projectSummary?: string;
+  keyFeatures?: string[];
+  overview?: string;
+  executive_overview?: ExecutiveOverview;
+  architecture?: ArchitectureAnalysis;
+  architecture_summary?: string;
+  modules?: any[];
+  ai_insights?: string[];
+  similar_repositories?: SimilarRepo[];
+  analysis_evidence?: Record<string, unknown>;
+  languages?: string[]; // Add languages
+  error?: string;
+}

@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-repoiq}
+      POSTGRES_USER: ${POSTGRES_USER:-repoiq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-repoiq-dev-password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - repoiq_postgres_data:/var/lib/postgresql/data
+    networks:
+      - repoiq
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-repoiq}:${POSTGRES_PASSWORD:-repoiq-dev-password}@postgres:5432/${POSTGRES_DB:-repoiq}
+      CLONE_BASE_DIR: /tmp/repoiq
+      ENABLE_ASYNC_JOBS: ${ENABLE_ASYNC_JOBS:-false}
+    env_file:
+      - path: ../../backend/.env
+        required: false
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ../../backend/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - repoiq
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+  
+  frontend:
+    build:
+      context: ../../Frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_DEMO_API_URL: ${VITE_DEMO_API_URL:-}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - repoiq
+    restart: unless-stopped
+  
+networks:
+  repoiq:
+    driver: bridge
+  
+volumes:
+  repoiq_postgres_data:
