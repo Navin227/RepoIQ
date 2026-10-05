@@ -74,9 +74,7 @@ override.tf.json
 /infrastructure/terraform/FIXES_APPLIED.md
 
 # Bundled copies of the project
-/backend.zip
-/Frontend.zip
-/infrastructure.zip
+*.zip
 /repoiq-backend.tar.gz
 
 # Local Kubernetes secret containing development credentials
