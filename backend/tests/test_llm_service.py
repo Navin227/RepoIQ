@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -222,3 +223,42 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch):
     assert "stack" in body
     assert "folder_structure" in body
     assert body["similar_repositories"][0]["fullName"] == "appwrite/appwrite"
+
+
+def test_repo_scanner_finds_nested_readme(tmp_path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "README.md").write_text(
+        "# Deploy orchestration\nThis project automates releases.",
+        encoding="utf-8",
+    )
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("print('demo')\n", encoding="utf-8")
+
+    scan = __import__("app.utils.repo_scanner", fromlist=["RepoScanner"]).RepoScanner().scan(repo)
+
+    assert "automates releases" in scan["readme"]
+    assert (repo / "docs" / "README.md").exists()
+
+
+def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
+    def fake_gemini(self, payload):
+        return '{"overview":"Deployment automation for release teams.","executive_overview":{"what_is_this_project":["This project helps teams ship updates."],"why_was_it_built":"It reduces release friction.","user_features":[{"name":"Deploy changes","description":"Ship code consistently."}],"typical_use_cases":["A team releases software"],"who_is_this_for":["Engineering teams"],"why_is_it_valuable":"It saves time.","one_line_summary":"Deployment automation for product teams."},"modules":[],"architecture":{"summary":"Single service architecture","flow":["User","Frontend","API"]}}'
+
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr('app.services.llm_service.settings.analysis_debug_logging', True, raising=False)
+    caplog.set_level(logging.INFO)
+
+    analysis = LLMService().generate_repository_analysis(
+        metadata={"full_name": "acme/deploy", "description": "Deployment tooling"},
+        readme="# Deploy\nThis project helps teams ship updates.",
+        stack={"categories": {}},
+        repository_structure=[],
+        scan={"files": [], "dependencies": {}, "source_previews": {}, "source_evidence": {}},
+    )
+
+    assert analysis["executive_overview"]["what_is_this_project"][0].startswith("This project")
+    assert "GEMINI_INPUT_START" in caplog.text
+    assert "GEMINI_INPUT_END" in caplog.text

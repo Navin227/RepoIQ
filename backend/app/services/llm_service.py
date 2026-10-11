@@ -2,12 +2,14 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import settings
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
+from app.services.source_evidence_extractor import redact_secrets
 
 logger = logging.getLogger(__name__)
 MAX_GEMINI_INPUT_TOKENS = 100_000
@@ -26,19 +28,31 @@ class LLMService:
         scan: Dict[str, Any],
     ) -> Dict[str, Any]:
         payload = self._build_input_payload(metadata, readme, stack, repository_structure, scan)
+        payload["analysis_id"] = str(payload.get("analysis_id") or uuid.uuid4().hex[:12])
+        logger.info(
+            "ANALYSIS_REQUEST_START analysis_id=%s repo=%s readme_chars=%s",
+            payload["analysis_id"],
+            metadata.get("full_name") or metadata.get("name") or "unknown",
+            len(str(readme or "")),
+        )
 
         try:
+            prompt_snapshot = json.dumps(payload, ensure_ascii=False, indent=2)
+            self._log_gemini_input(payload["analysis_id"], self.provider, prompt_snapshot)
             response_text = self._generate_with_gemini(payload)
+            self._log_gemini_output(payload["analysis_id"], self.provider, response_text)
             generated = self._parse_json_response(response_text)
             analysis = self._normalize_analysis(generated, payload)
             analysis["analysis_evidence"] = payload["analysis_evidence"]
             self._log_analysis_sections(analysis, fallback=False)
+            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=success", payload["analysis_id"])
             return analysis
         except Exception as exc:
             reason = self._fallback_reason(exc)
-            logger.warning("Analysis fallback activated: reason=%s", reason)
+            logger.warning("Analysis fallback activated: reason=%s analysis_id=%s", reason, payload["analysis_id"])
             analysis = self._fallback_analysis(payload)
             self._log_analysis_sections(analysis, fallback=True)
+            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=fallback", payload["analysis_id"])
             return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
@@ -54,6 +68,8 @@ class LLMService:
             raise RuntimeError("GEMINI_API_KEY is not configured")
 
         provider_payload = json.loads(json.dumps(payload))
+        analysis_id = str(provider_payload.get("analysis_id") or uuid.uuid4().hex[:12])
+        provider_payload["analysis_id"] = analysis_id
         prompt = f"""
 You are a repository analysis engine.
 Return ONLY valid JSON. Do not include Markdown, comments, or extra text.
@@ -237,6 +253,7 @@ Repository input:
                     omitted_files,
                     token_count,
                 )
+                self._log_gemini_input(analysis_id, model_name, prompt)
                 provider_started = time.perf_counter()
                 response = model.generate_content(prompt, generation_config=generation_config)
                 logger.info(
@@ -270,6 +287,31 @@ Repository input:
         if not text.strip():
             raise RuntimeError("Gemini returned an empty response")
         return text
+
+    @staticmethod
+    def _debug_preview(text: str, limit: int = 12_000) -> str:
+        safe_text = redact_secrets(str(text or ""))
+        if len(safe_text) <= limit:
+            return safe_text
+        return safe_text[:limit] + f"\n... [truncated {len(safe_text) - limit} characters]"
+
+    @staticmethod
+    def _log_gemini_input(analysis_id: str, model_name: str, prompt: str) -> None:
+        if not settings.analysis_debug_logging:
+            return
+        preview_limit = max(1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000))
+        logger.info("GEMINI_INPUT_START analysis_id=%s model=%s prompt_chars=%s", analysis_id, model_name, len(prompt))
+        logger.info("GEMINI_INPUT_PREVIEW analysis_id=%s %s", analysis_id, LLMService._debug_preview(prompt, preview_limit))
+        logger.info("GEMINI_INPUT_END analysis_id=%s", analysis_id)
+
+    @staticmethod
+    def _log_gemini_output(analysis_id: str, model_name: str, response_text: str) -> None:
+        if not settings.analysis_debug_logging:
+            return
+        preview_limit = max(1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000))
+        logger.info("GEMINI_OUTPUT_START analysis_id=%s model=%s response_chars=%s", analysis_id, model_name, len(str(response_text or "")))
+        logger.info("GEMINI_OUTPUT_PREVIEW analysis_id=%s %s", analysis_id, LLMService._debug_preview(response_text, preview_limit))
+        logger.info("GEMINI_OUTPUT_END analysis_id=%s", analysis_id)
 
     @staticmethod
     def _fallback_reason(exc: Exception) -> str:
@@ -323,15 +365,19 @@ Repository input:
         )
         domain_signals = analysis_evidence.get("domain_signals", [])
 
+        readme_text = str(readme or "")
         payload = {
+            "analysis_id": str(metadata.get("analysis_id") or uuid.uuid4().hex[:12]),
             "metadata": {
                 "name": metadata.get("name") or metadata.get("repo_name") or metadata.get("full_name"),
                 "full_name": metadata.get("full_name"),
                 "description": metadata.get("description", ""),
                 "primary_language": metadata.get("language") or metadata.get("primary_language"),
                 "topics": metadata.get("topics", []),
+                "readme_source": metadata.get("readme_source") or "repository_scan",
             },
-            "readme_summary": self._summarize_readme(readme),
+            "readme_text": readme_text[:12_000],
+            "readme_summary": self._summarize_readme(readme_text),
             "detected_technology_stack": stack,
             "repository_structure": self._trim_structure(repository_structure),
             "file_tree": scan.get("files", [])[:500],
@@ -383,7 +429,7 @@ Repository input:
 
     def _summarize_readme(self, readme: str) -> str:
         text = " ".join((readme or "").split())
-        return text[:3000]
+        return text[:8000]
 
     def _trim_structure(self, structure: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         def trim_node(node: Dict[str, Any], depth: int = 0) -> Dict[str, Any]:
@@ -590,7 +636,7 @@ Repository input:
                 "confidence": confidence,
             })
 
-        if not normalized_modules:
+        if not normalized_modules and modules:
             raise ValueError("Gemini response contained no usable modules")
 
         normalized_architecture = self._normalize_architecture(architecture)

@@ -204,6 +204,35 @@ class GitHubService:
         except (TypeError, ValueError):
             return 0
 
+    def fetch_default_branch(self, repo_url: str) -> str:
+        owner, name = self._owner_and_repo(repo_url)
+        response = httpx.get(
+            f"https://api.github.com/repos/{owner}/{name}",
+            headers=self._headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        return str(response.json().get("default_branch") or "main")
+
+    def fetch_readme(self, repo_url: str, default_branch: str | None = None) -> str | None:
+        owner, name = self._owner_and_repo(repo_url)
+        branch = default_branch or self.fetch_default_branch(repo_url)
+        response = httpx.get(
+            f"https://api.github.com/repos/{owner}/{name}/readme",
+            headers=self._headers(),
+            params={"ref": branch},
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        payload = response.json()
+        content = payload.get("content") if isinstance(payload, dict) else None
+        if not isinstance(content, str):
+            return None
+        import base64
+        return base64.b64decode(content).decode("utf-8", errors="replace")
+
     def fetch_metadata(self, repo_url: str) -> dict:
         owner, name = self._owner_and_repo(repo_url)
         response = httpx.get(
@@ -242,22 +271,29 @@ class GitHubService:
             "local_path": repo_dir.as_posix(),
         }
 
+    def find_readme_path(self, repository_path: Path) -> tuple[Path | None, str]:
+        readme_candidates: list[tuple[int, int, Path]] = []
+        for candidate in repository_path.rglob("*"):
+            if not candidate.is_file() or not candidate.name.lower().startswith("readme."):
+                continue
+            relative_parts = candidate.relative_to(repository_path).parts
+            docs_rank = 0 if "docs" in relative_parts or "documentation" in relative_parts else 1
+            readme_candidates.append((docs_rank, len(relative_parts), candidate))
+
+        if not readme_candidates:
+            return None, "not_found"
+
+        _, _, selected = sorted(readme_candidates, key=lambda item: (item[0], item[1]))[0]
+        return selected, str(selected.relative_to(repository_path))
+
     def find_readme(self, repository_path: Path) -> str | None:
-        candidates = ["readme.md", "readme.rst", "readme.txt"]
-        files = {
-            child.name.lower(): child
-            for child in repository_path.iterdir()
-            if child.is_file()
-        }
-
-        for candidate in candidates:
-            if candidate in files:
-                try:
-                    return files[candidate].read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    return files[candidate].read_text(encoding="utf-8", errors="ignore")
-
-        return None
+        readme_path, _ = self.find_readme_path(repository_path)
+        if readme_path is None:
+            return None
+        try:
+            return readme_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return readme_path.read_text(encoding="utf-8", errors="ignore")
 
     def _owner_and_repo(self, repo_url: str) -> tuple[str, str]:
         parsed = urlparse(repo_url)

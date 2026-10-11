@@ -63,8 +63,19 @@ def analyze_repository(
                     "full_name": repo_name,
                     "description": description,
                     "topics": [],
+                    "readme_source": "local_path",
                 }
-            readme_content = github_service.find_readme(repo_path) or ""
+            readme_path, readme_source = github_service.find_readme_path(repo_path)
+            readme_content = github_service.find_readme(repo_path) or github_service.fetch_readme(payload.repo_url, repository_metadata.get("default_branch")) or ""
+            repository_metadata["readme_source"] = readme_source
+            logger.info(
+                "README selected for analysis repo=%s path=%s source=%s bytes=%s chars=%s",
+                repository_metadata.get("full_name") or repo_name,
+                str(readme_path) if readme_path else "missing",
+                readme_source,
+                len(readme_content.encode("utf-8")) if readme_content else 0,
+                len(readme_content) if readme_content else 0,
+            )
         else:
             raise HTTPException(status_code=400, detail="Either repo_url or local_path is required")
 

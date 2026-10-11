@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     clone_base_dir: str = "/tmp/repoiq"
     enable_async_jobs: bool = False
+    analysis_debug_logging: bool = False
+    analysis_debug_preview_chars: int = 12_000
 
     model_config = SettingsConfigDict(
         env_file=(".env", "backend/.env"),
