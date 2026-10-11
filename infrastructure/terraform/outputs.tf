@@ -56,6 +56,11 @@ output "demo_api_endpoint" {
   value       = module.api_gateway.api_endpoint
 }
 
+output "backend_api_endpoint" {
+  description = "HTTPS Lambda Function URL for the RepoIQ backend proxy"
+  value       = module.lambda.backend_api_endpoint
+}
+
 output "golden_snapshot_id" {
   description = "Configured golden snapshot ID used for ephemeral demo EC2 launches"
   value       = var.snapshot_id == "snap-0000000000000000" ? module.ec2.golden_snapshot_id : var.snapshot_id

@@ -123,32 +123,32 @@ resource "aws_iam_role_policy" "lambda_ec2_control" {
       },
 
       {
-  Sid    = "ReadDemoInitTelemetry"
-  Effect = "Allow"
-  Action = [
-    "s3:GetObject"
-  ]
-  Resource = [
-    "arn:aws:s3:::${var.artifacts_bucket_name}/artifacts/demo-init/*"
-  ]
-},
-{
-  Sid    = "ListDemoInitTelemetry"
-  Effect = "Allow"
-  Action = [
-    "s3:ListBucket"
-  ]
-  Resource = [
-    "arn:aws:s3:::${var.artifacts_bucket_name}"
-  ]
-  Condition = {
-    StringLike = {
-      "s3:prefix" = [
-        "artifacts/demo-init/*"
-      ]
-    }
-  }
-}
+        Sid    = "ReadDemoInitTelemetry"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.artifacts_bucket_name}/artifacts/demo-init/*"
+        ]
+      },
+      {
+        Sid    = "ListDemoInitTelemetry"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.artifacts_bucket_name}"
+        ]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "artifacts/demo-init/*"
+            ]
+          }
+        }
+      }
     ]
   })
 }
@@ -275,4 +275,112 @@ resource "aws_lambda_function" "status" {
 
   depends_on = [aws_cloudwatch_log_group.status]
   tags       = var.common_tags
+}
+
+resource "aws_cloudwatch_log_group" "backend_proxy" {
+  name              = "/aws/lambda/${var.project_name}-backend-proxy"
+  retention_in_days = 7
+  tags              = var.common_tags
+}
+
+resource "aws_iam_role" "backend_proxy_exec" {
+  name = "${var.project_name}-backend-proxy-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy" "backend_proxy" {
+  name = "${var.project_name}-backend-proxy"
+  role = aws_iam_role.backend_proxy_exec.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "FindRunningDemoInstance"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeInstances"]
+        Resource = "*"
+      },
+      {
+        Sid      = "WriteBackendProxyLogs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.backend_proxy.arn}:*"
+      }
+    ]
+  })
+}
+
+data "archive_file" "backend_proxy" {
+  type        = "zip"
+  source_file = "${path.module}/src/backend_proxy.py"
+  output_path = "${path.module}/dist/backend_proxy.zip"
+}
+
+resource "aws_lambda_function" "backend_proxy" {
+  function_name    = "${var.project_name}-backend-proxy"
+  role             = aws_iam_role.backend_proxy_exec.arn
+  handler          = "backend_proxy.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.backend_proxy.output_path
+  source_code_hash = data.archive_file.backend_proxy.output_base64sha256
+  memory_size      = 128
+  timeout          = 900
+
+  environment {
+    variables = {
+      PROJECT_NAME = var.project_name
+      ENVIRONMENT  = var.environment
+      BACKEND_PORT = "80"
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.backend_proxy,
+    aws_iam_role_policy.backend_proxy,
+  ]
+  tags = var.common_tags
+}
+
+resource "aws_lambda_function_url" "backend_proxy" {
+  function_name      = aws_lambda_function.backend_proxy.function_name
+  authorization_type = "NONE"
+  invoke_mode        = "BUFFERED"
+
+  cors {
+    allow_origins = [var.frontend_origin]
+    allow_methods = ["GET", "POST"]
+    allow_headers = ["Authorization", "Content-Type"]
+    max_age       = 300
+  }
+}
+
+resource "aws_lambda_permission" "backend_proxy_function_url" {
+  statement_id           = "AllowPublicBackendFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.backend_proxy.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
+resource "aws_lambda_permission" "backend_proxy_invoke_via_url" {
+  statement_id             = "AllowBackendFunctionUrlInvoke"
+  action                   = "lambda:InvokeFunction"
+  function_name            = aws_lambda_function.backend_proxy.function_name
+  principal                = "*"
+  invoked_via_function_url = true
 }

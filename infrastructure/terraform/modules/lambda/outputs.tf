@@ -38,6 +38,11 @@ output "status_lambda_invoke_arn" {
   value       = aws_lambda_function.status.invoke_arn
 }
 
+output "backend_api_endpoint" {
+  description = "HTTPS Lambda Function URL for the RepoIQ backend proxy"
+  value       = aws_lambda_function_url.backend_proxy.function_url
+}
+
 output "lambda_exec_role_arn" {
   description = "ARN of the Lambda execution IAM role"
   value       = aws_iam_role.lambda_exec.arn

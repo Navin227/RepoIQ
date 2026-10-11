@@ -14,6 +14,11 @@ variable "common_tags" {
   default     = {}
 }
 
+variable "frontend_origin" {
+  description = "Frontend origin allowed to call the backend Lambda Function URL"
+  type        = string
+}
+
 variable "ami_id" {
   description = "AMI ID used by the start Lambda when launching a demo EC2 instance"
   type        = string

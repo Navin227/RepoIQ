@@ -484,7 +484,9 @@ export default function App() {
             : String(error)
         )
           ? 'RepoIQ search request failed.'
-          : 'GitHub search failed'
+          : error instanceof Error
+            ? error.message
+            : 'GitHub search failed'
       );
 
       setSearchResults([]);

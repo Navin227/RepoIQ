@@ -1,47 +1,16 @@
 import { AnalysisResult, TechStack, SimilarRepo } from '../types';
+import { buildSearchRequestUrl, resolveApiBase } from './api-base';
 
-const browserHostname = window.location.hostname;
-
-/**
- * Runtime API base resolver.
- *
- * Public EC2 traffic goes through Traefik on port 80:
- *   http://EC2_PUBLIC_IP/search
- *   http://EC2_PUBLIC_IP/analyze
- *
- * If an old /demo/status response contains :8000, normalize it away.
- * Localhost development may continue using :8000.
- */
-const resolveApiBase = (runtimeApiBase?: string | null) => {
-  if (!runtimeApiBase) return '';
-
-  const candidate = runtimeApiBase.trim().replace(/\/$/, '');
-  if (!candidate) return '';
-
-  try {
-    const url = new URL(candidate, window.location.origin);
-
-    const isLocalBrowser =
-      browserHostname === 'localhost' ||
-      browserHostname === '127.0.0.1';
-
-    const isLocalCandidate =
-      url.hostname === 'localhost' ||
-      url.hostname === '127.0.0.1';
-
-    if (isLocalCandidate && isLocalBrowser) {
-      return candidate;
-    }
-
-    if (url.port === '8000') {
-      url.port = '';
-    }
-
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return '';
+class ApiNetworkError extends Error {
+  constructor(operation: string, url: string) {
+    const safeUrl = new URL(url).origin;
+    super(
+      `${operation} could not reach the RepoIQ API at ${safeUrl}. ` +
+      'Check that the endpoint is deployed, DNS and TLS are valid, and backend CORS allows this Amplify origin.'
+    );
+    this.name = 'ApiNetworkError';
   }
-};
+}
 
 const fetchWithDefensiveRetry = async (
   url: string,
@@ -56,6 +25,9 @@ const fetchWithDefensiveRetry = async (
       return await fetch(url, options);
     } catch (error) {
       if (attempt === MAX_ATTEMPTS) {
+        if (error instanceof TypeError) {
+          throw new ApiNetworkError(operation, url);
+        }
         throw error;
       }
 
@@ -395,7 +367,11 @@ export async function searchRepositories(
 ): Promise<SimilarRepo[]> {
   console.log('🔍 [API] Requesting search:', query);
 
-  const apiBase = resolveApiBase(runtimeApiBase);
+  const apiBase = resolveApiBase({
+    configuredApiBase: import.meta.env.VITE_API_BASE_URL,
+    runtimeApiBase,
+    pageOrigin: window.location.origin,
+  });
 
   if (!apiBase) {
     throw new Error(
@@ -408,7 +384,7 @@ export async function searchRepositories(
   console.log('[RepoIQ] Query normalization:', { original: query, normalized: normalizedQuery });
 
   try {
-    const url = `${apiBase}/search?q=${encodeURIComponent(normalizedQuery)}`;
+    const url = buildSearchRequestUrl(apiBase, normalizedQuery);
 
     const response = await fetchWithDefensiveRetry(
       url,
@@ -417,7 +393,9 @@ export async function searchRepositories(
     );
 
     if (!response.ok) {
-      throw new Error(`Search failed (HTTP ${response.status})`);
+      throw new Error(
+        `Search failed: RepoIQ API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`
+      );
     }
 
     const responseData: unknown = await response.json();
@@ -442,7 +420,19 @@ export async function analyzeRepository(
 ): Promise<AnalysisResult> {
   console.log('📡 [API] Requesting analysis:', data);
 
-  const apiBase = resolveApiBase(runtimeApiBase);
+  let apiBase: string;
+  try {
+    apiBase = resolveApiBase({
+      configuredApiBase: import.meta.env.VITE_API_BASE_URL,
+      runtimeApiBase,
+      pageOrigin: window.location.origin,
+    });
+  } catch (error) {
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Invalid RepoIQ API URL configuration.',
+    };
+  }
 
   if (!apiBase) {
     return {
@@ -470,7 +460,7 @@ export async function analyzeRepository(
     if (!response.ok) {
       return {
         status: 'error',
-        error: `Analysis failed (HTTP ${response.status})`,
+        error: `Analysis failed: RepoIQ API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`,
       };
     }
 

@@ -155,6 +155,7 @@ module "lambda" {
   project_name          = var.project_name
   environment           = var.environment
   common_tags           = var.common_tags
+  frontend_origin       = var.frontend_origin
   ami_id                = module.ec2.ami_id
   root_snapshot_id      = var.snapshot_id == "snap-0000000000000000" ? module.ec2.golden_snapshot_id : var.snapshot_id
   instance_type         = var.instance_type
