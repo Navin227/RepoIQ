@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -28,8 +29,8 @@ GENERATED_DIR_MARKERS = {
 }
 
 ENTRYPOINT_NAMES = {
-    "main.py", "app.py", "server.py", "wsgi.py", "asgi.py", "manage.py",
-    "index.ts", "index.js", "main.ts", "main.js", "server.ts", "server.js",
+    "main.py", "app.py", "app.tsx", "server.py", "wsgi.py", "asgi.py", "manage.py",
+    "index.ts", "index.js", "index.tsx", "main.ts", "main.js", "main.tsx", "server.ts", "server.js",
     "main.go", "Main.java", "Application.java", "Program.cs",
 }
 
@@ -39,11 +40,33 @@ MAX_SELECTED_FILES = 45
 MAX_CHARS_PER_FILE = 8000
 MAX_TOTAL_EVIDENCE_CHARS = 120_000
 
+PROJECT_MANIFEST_NAMES = {
+    "package.json", "pyproject.toml", "requirements.txt", "go.mod",
+    "cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+    "composer.json", "gemfile", "mix.exs", "pubspec.yaml",
+}
+TOOL_CONFIG_PATTERN = re.compile(
+    r"(^|/)(?:[^/]*\.config\.[^/]+|[^/]*config\.[^/]+|config/[^/]+|"
+    r"tsconfig(?:\.[^/]*)?\.json|angular\.json|\.babelrc(?:\.[^/]*)?|"
+    r"\.eslintrc(?:\.[^/]*)?)$",
+    re.IGNORECASE,
+)
+
 SECRET_PATTERNS = [
-    (re.compile(r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[=:]\s*['\"]?[^\s'\"]{8,}"), r"\1=[REDACTED]"),
-    (re.compile(r"(?i)(password|passwd|pwd)\s*[=:]\s*['\"]?[^\s'\"]{4,}"), r"\1=[REDACTED]"),
+    (
+        re.compile(
+            r"""(?i)((?:[A-Z0-9_-]*)(?:api[_-]?key|secret(?:[_-]?key)?|"""
+            r"""access[_-]?(?:token|key)|refresh[_-]?token|auth[_-]?token|"""
+            r"""token|password|passwd|pwd|credentials?)\s*[=:]\s*)"""
+            r"""(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
+        ),
+        r"\1[REDACTED]",
+    ),
+    (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(aws_secret_access_key|private_key)\s*[=:]\s*['\"]?[^\s'\"]+"), r"\1=[REDACTED]"),
     (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "[REDACTED_TOKEN]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_TOKEN]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"), "[REDACTED_TOKEN]"),
     (re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "[REDACTED_TOKEN]"),
     (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END"), "[REDACTED_PRIVATE_KEY]"),
     (re.compile(r"(?i)(mongodb(\+srv)?|postgres(ql)?|mysql|redis)://[^\s'\"@]+:[^\s'\"@]+@"), r"\1://[REDACTED]@"),
@@ -53,6 +76,7 @@ ROLE_PATTERNS: list[tuple[str, re.Pattern[str], int, list[str]]] = [
     ("entrypoint", re.compile(r"(^|/)(main|app|server|index|wsgi|asgi|manage)\.(py|js|ts|go|java)$", re.I), 98, ["application entrypoint"]),
     ("api_route", re.compile(r"(routes?|routers?|api|endpoints?)/", re.I), 92, ["API routing layer"]),
     ("api_route", re.compile(r"(routes?|router)\.(py|ts|js|go)$", re.I), 90, ["route definition file"]),
+    ("service", re.compile(r"(^|/)(api|api-client|http-client)\.(py|ts|tsx|js|jsx)$", re.I), 80, ["API client or service implementation"]),
     ("controller", re.compile(r"controllers?/", re.I), 88, ["HTTP controller"]),
     ("controller", re.compile(r"Controller\.(java|kt|cs)$"), 88, ["controller class file"]),
     ("service", re.compile(r"services?/", re.I), 86, ["business/service layer"]),
@@ -201,43 +225,50 @@ def extract_routes_from_content(content: str, file_path: str) -> list[dict[str, 
 def _smart_truncate(content: str, max_chars: int, language: str) -> str:
     if len(content) <= max_chars:
         return content
-    preserved: list[str] = []
+    lines = content.splitlines()
+    selected: set[int] = set()
     budget = max_chars
-    line_patterns = [
-        r"^(import |from )",
-        r"^(export |class |def |async def |function |@)",
-        r"^(router\.|app\.|@(?:Get|Post|Put|Delete|Patch|Route))",
-        r"^\s*@(get|post|put|delete|patch|app|router)",
-    ]
-    if language == "go":
-        line_patterns.append(r"^func ")
-    if language == "java":
-        line_patterns.append(r"^\s*(public|private|protected|@RestController|@Service|@Entity)")
-    important_lines: list[str] = []
-    other_lines: list[str] = []
-    for line in content.splitlines():
-        if any(re.search(p, line) for p in line_patterns):
-            important_lines.append(line)
-        else:
-            other_lines.append(line)
-    for line in important_lines:
-        if budget <= 0:
-            break
-        chunk = line + "\n"
-        if len(chunk) <= budget:
-            preserved.append(chunk)
-            budget -= len(chunk)
-    if budget > 200:
-        for line in other_lines:
-            if budget <= 0:
-                break
-            chunk = line + "\n"
-            if len(chunk) <= budget:
-                preserved.append(chunk)
-                budget -= len(chunk)
+    import_budget = min(1500, max_chars // 4)
+
+    anchors: list[tuple[int, int, int]] = []
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*(?:import |from )", line):
+            line_cost = len(line) + 1
+            if line_cost <= import_budget:
+                selected.add(index)
+                import_budget -= line_cost
+                budget -= line_cost
+        elif re.search(r"(?:router|app|api)\.(?:get|post|put|delete|patch|route)\s*\(", line, re.I):
+            anchors.append((12, index, min(index + 14, len(lines) - 1)))
+        elif re.match(
+            r"^\s*(?:export\s+|async\s+)?(?:default\s+)?"
+            r"(?:class|function|def|func|type|interface|enum)\b|"
+            r"^\s*(?:async\s+)?def\b|^\s*@",
+            line,
+        ):
+            anchors.append((10, index, min(index + 12, len(lines) - 1)))
+        elif language == "java" and re.match(
+            r"^\s*(?:public|private|protected)\s+", line
+        ):
+            anchors.append((9, index, min(index + 12, len(lines) - 1)))
+
+    for _, start, end in sorted(anchors, key=lambda item: (-item[0], item[1])):
+        new_indexes = [index for index in range(start, end + 1) if index not in selected]
+        cost = sum(len(lines[index]) + 1 for index in new_indexes)
+        if cost <= budget:
+            selected.update(new_indexes)
+            budget -= cost
+
+    ordered = sorted(selected)
+    preserved: list[str] = []
+    previous = -1
+    for index in ordered:
+        if index > previous + 1:
+            preserved.append("# ... [intervening source omitted] ...\n")
+        preserved.append(lines[index] + "\n")
+        previous = index
+
     result = "".join(preserved)
-    if len(result) < len(content):
-        result += "\n# ... [truncated for evidence budget] ...\n"
     return result[:max_chars]
 
 
@@ -256,6 +287,23 @@ def _score_file(rel_path: str) -> ScoredFile | None:
         return None
     if LOW_VALUE_NAME_PATTERNS.search(name):
         return None
+
+    if name.lower() in PROJECT_MANIFEST_NAMES:
+        return ScoredFile(
+            path=rel_path,
+            role="dependency_manifest",
+            priority=91,
+            reasons=["project dependency manifest"],
+        )
+
+    if TOOL_CONFIG_PATTERN.search(lower):
+        return ScoredFile(
+            path=rel_path,
+            role="tooling_config",
+            priority=77,
+            reasons=["build or framework configuration"],
+        )
+
     suffix = Path(rel_path).suffix.lower()
     if suffix not in SOURCE_SUFFIXES and not (
         name.lower() in ("dockerfile",) or name.endswith((".yml", ".yaml", ".tf"))
@@ -281,6 +329,16 @@ def _score_file(rel_path: str) -> ScoredFile | None:
     if best_priority <= 45 and suffix not in SOURCE_SUFFIXES:
         return None
     return ScoredFile(path=rel_path, role=best_role, priority=best_priority, reasons=reasons)
+
+
+def _exclusion_reason(rel_path: str) -> str:
+    lower = rel_path.lower()
+    name = Path(rel_path).name
+    if any(part in GENERATED_DIR_MARKERS for part in lower.split("/")):
+        return "generated_directory"
+    if LOW_VALUE_NAME_PATTERNS.search(name):
+        return "low_value_filename"
+    return "no_matching_file_role"
 
 
 def _categorize_path(role: str, rel_path: str, buckets: dict[str, list[str]]) -> None:
@@ -371,34 +429,76 @@ class SourceEvidenceExtractor:
 
         candidates: list[ScoredFile] = []
         source_file_count = 0
+        excluded: list[dict[str, str]] = []
         for rel in files:
             if Path(rel).suffix.lower() in SOURCE_SUFFIXES:
                 source_file_count += 1
             scored = _score_file(rel)
             if scored:
                 candidates.append(scored)
+            elif (
+                Path(rel).suffix.lower() in SOURCE_SUFFIXES
+                or Path(rel).name.lower() in PROJECT_MANIFEST_NAMES
+                or TOOL_CONFIG_PATTERN.search(rel.lower())
+                or Path(rel).name.lower() == "dockerfile"
+                or Path(rel).suffix.lower() in {".yml", ".yaml", ".tf"}
+            ):
+                excluded.append({"path": rel, "reason": _exclusion_reason(rel)})
 
         candidates.sort(key=lambda c: (-c.priority, c.path))
+        discovered_candidate_count = len(candidates)
+        for cand in candidates[MAX_CANDIDATE_FILES:]:
+            excluded.append({"path": cand.path, "reason": "candidate_limit"})
         candidates = candidates[:MAX_CANDIDATE_FILES]
 
         all_routes: list[dict[str, Any]] = []
         selected: list[dict[str, Any]] = []
         total_chars = 0
+        total_available_chars = 0
+        successfully_read: list[str] = []
+        read_attempts = 0
 
-        for cand in candidates[:MAX_FILE_READ_ATTEMPTS]:
+        for candidate_index, cand in enumerate(candidates):
             if len(selected) >= MAX_SELECTED_FILES:
+                excluded.extend(
+                    {"path": item.path, "reason": "selected_file_limit"}
+                    for item in candidates[candidate_index:]
+                )
                 break
             if total_chars >= MAX_TOTAL_EVIDENCE_CHARS:
+                excluded.extend(
+                    {"path": item.path, "reason": "total_character_budget"}
+                    for item in candidates[candidate_index:]
+                )
+                break
+            if read_attempts >= MAX_FILE_READ_ATTEMPTS:
+                excluded.extend(
+                    {"path": item.path, "reason": "read_attempt_limit"}
+                    for item in candidates[candidate_index:]
+                )
                 break
 
             abs_path = repo_path / cand.path
             if not abs_path.is_file():
+                excluded.append({"path": cand.path, "reason": "file_missing"})
                 continue
+            read_attempts += 1
             try:
                 raw = abs_path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+            except OSError as exc:
+                logger.warning(
+                    "Source evidence read failed: path=%s error_type=%s",
+                    cand.path,
+                    type(exc).__name__,
+                )
+                excluded.append({
+                    "path": cand.path,
+                    "reason": f"read_error_{type(exc).__name__}",
+                })
                 continue
 
+            successfully_read.append(cand.path)
+            total_available_chars += len(raw)
             lang = _language_from_path(cand.path)
             redacted = redact_secrets(raw)
             content = _smart_truncate(redacted, MAX_CHARS_PER_FILE, lang)
@@ -406,8 +506,16 @@ class SourceEvidenceExtractor:
             if total_chars + chunk_len > MAX_TOTAL_EVIDENCE_CHARS:
                 remaining = MAX_TOTAL_EVIDENCE_CHARS - total_chars
                 if remaining < 500:
+                    excluded.append({
+                        "path": cand.path,
+                        "reason": "remaining_character_budget_below_500",
+                    })
+                    excluded.extend(
+                        {"path": item.path, "reason": "total_character_budget"}
+                        for item in candidates[candidate_index + 1:]
+                    )
                     break
-                content = content[:remaining]
+                content = _smart_truncate(content, remaining, lang)
                 chunk_len = len(content)
 
             symbols = _extract_symbols(redacted, lang)
@@ -425,6 +533,11 @@ class SourceEvidenceExtractor:
                 "symbols": symbols,
                 "imports": imports,
             }
+            if len(redacted) > len(content):
+                entry["content_truncated"] = True
+                entry["content_truncation_reason"] = "source evidence character budget"
+                entry["content_chars_available"] = len(redacted)
+                entry["content_chars_selected"] = len(content)
             if api_calls:
                 entry["api_calls"] = api_calls
             entry["content"] = content
@@ -433,6 +546,14 @@ class SourceEvidenceExtractor:
             buckets["selected_source_files"].append(cand.path)
             _categorize_path(cand.role, cand.path, buckets)
             total_chars += chunk_len
+
+        for rel in files:
+            if (
+                Path(rel).suffix.lower() in SOURCE_SUFFIXES
+                and rel not in {cand.path for cand in candidates}
+                and not any(item["path"] == rel for item in excluded)
+            ):
+                excluded.append({"path": rel, "reason": "not_selected_by_file_policy"})
 
         # Dedupe routes
         seen_routes: set[tuple[str, str, str]] = set()
@@ -453,21 +574,43 @@ class SourceEvidenceExtractor:
 
         stats = {
             "total_files_in_scan": len(files),
+            "discovered_source_files": source_file_count,
             "source_files_count": source_file_count,
-            "candidate_evidence_files": len(candidates),
+            "candidate_evidence_files": discovered_candidate_count,
             "selected_evidence_files": len(selected),
             "routes_detected": len(unique_routes),
+            "symbols_detected": len({
+                symbol for item in selected for symbol in item.get("symbols", [])
+            }),
+            "models_detected": len({
+                symbol
+                for item in selected
+                if item.get("role") == "model"
+                for symbol in item.get("symbols", [])
+            }),
+            "source_files_read": len(successfully_read),
+            "source_chars_available": total_available_chars,
+            "source_chars_selected": total_chars,
             "evidence_payload_chars": total_chars,
+            "excluded_file_counts": {
+                reason: sum(item["reason"] == reason for item in excluded)
+                for reason in dict.fromkeys(item["reason"] for item in excluded)
+            },
         }
 
         logger.info(
-            "Source evidence: scanned=%s source=%s candidates=%s selected=%s routes=%s payload_chars=%s",
-            stats["total_files_in_scan"],
-            stats["source_files_count"],
-            stats["candidate_evidence_files"],
-            stats["selected_evidence_files"],
-            stats["routes_detected"],
-            stats["evidence_payload_chars"],
+            "Repository evidence selection: %s",
+            json.dumps({
+                "discovered_files": files,
+                "discovered_source_files": [
+                    path for path in files if Path(path).suffix.lower() in SOURCE_SUFFIXES
+                ],
+                "source_files_read": successfully_read,
+                "candidate_evidence_files": [cand.path for cand in candidates],
+                "selected_evidence_files": [item["path"] for item in selected],
+                "excluded_files": excluded,
+                **stats,
+            }, ensure_ascii=False),
         )
 
         return {

@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -9,6 +10,7 @@ from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 
 logger = logging.getLogger(__name__)
+MAX_GEMINI_INPUT_TOKENS = 100_000
 
 
 class LLMService:
@@ -30,10 +32,14 @@ class LLMService:
             generated = self._parse_json_response(response_text)
             analysis = self._normalize_analysis(generated, payload)
             analysis["analysis_evidence"] = payload["analysis_evidence"]
+            self._log_analysis_sections(analysis, fallback=False)
             return analysis
         except Exception as exc:
-            logger.warning("Gemini analysis failed; using rule-based fallback: %s", exc)
-            return self._fallback_analysis(payload)
+            reason = self._fallback_reason(exc)
+            logger.warning("Analysis fallback activated: reason=%s", reason)
+            analysis = self._fallback_analysis(payload)
+            self._log_analysis_sections(analysis, fallback=True)
+            return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
         if self.provider != "gemini":
@@ -47,6 +53,7 @@ class LLMService:
         if not settings.gemini_api_key:
             raise RuntimeError("GEMINI_API_KEY is not configured")
 
+        provider_payload = json.loads(json.dumps(payload))
         prompt = f"""
 You are a repository analysis engine.
 Return ONLY valid JSON. Do not include Markdown, comments, or extra text.
@@ -133,7 +140,7 @@ Rules:
 - Deployment must include only supported evidence such as Docker, Terraform, serverless, container-based, cloud-native, or traditional deployment.
 
 Repository input:
-{json.dumps(payload, indent=2)}
+{json.dumps(provider_payload, indent=2)}
         """.strip()
 
         genai.configure(api_key=settings.gemini_api_key)
@@ -146,12 +153,115 @@ Repository input:
         response = None
         errors = []
         for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
+            request_started = time.perf_counter()
+            provider_started = None
             try:
                 model = genai.GenerativeModel(model_name)
+                token_count = None
+                try:
+                    token_response = model.count_tokens(prompt)
+                    token_count = getattr(token_response, "total_tokens", None)
+                    if not isinstance(token_count, int):
+                        raise ValueError("Gemini token counter did not return total_tokens")
+                except Exception as exc:
+                    token_count = (len(prompt) + 1) // 2
+                    logger.warning(
+                        "Gemini token counting unavailable: model=%s error_type=%s estimated_tokens=%s",
+                        model_name,
+                        type(exc).__name__,
+                        token_count,
+                    )
+
+                omitted_files: list[str] = []
+                details = (
+                    provider_payload.get("source_evidence", {})
+                    .get("selected_source_file_details", [])
+                )
+                while token_count > MAX_GEMINI_INPUT_TOKENS and details:
+                    ranked_details = sorted(
+                        (
+                            item for item in details
+                            if isinstance(item, dict) and item.get("content")
+                        ),
+                        key=lambda item: (
+                            int(item.get("priority", 0)),
+                            str(item.get("path", "")),
+                        ),
+                    )
+                    if not ranked_details:
+                        break
+                    drop_count = max(1, (len(ranked_details) + 3) // 4)
+                    omitted_batch = ranked_details[:drop_count]
+                    for item in omitted_batch:
+                        item["content"] = ""
+                        item["content_omitted_reason"] = "Gemini input token budget"
+                        omitted_files.append(str(item.get("path") or ""))
+                    provider_payload["provider_evidence_exclusions"] = [
+                        {"path": path, "reason": "Gemini input token budget"}
+                        for path in omitted_files
+                    ]
+                    prompt = prompt.rsplit("\nRepository input:\n", 1)[0]
+                    prompt += "\nRepository input:\n" + json.dumps(provider_payload, indent=2)
+                    try:
+                        token_response = model.count_tokens(prompt)
+                        token_count = getattr(token_response, "total_tokens", None)
+                        if not isinstance(token_count, int):
+                            raise ValueError("Gemini token counter did not return total_tokens")
+                    except Exception as exc:
+                        token_count = (len(prompt) + 1) // 2
+                        logger.warning(
+                            "Gemini token counting unavailable after prioritization: model=%s error_type=%s estimated_tokens=%s",
+                            model_name,
+                            type(exc).__name__,
+                            token_count,
+                        )
+
+                if token_count > MAX_GEMINI_INPUT_TOKENS:
+                    raise RuntimeError("Gemini input exceeds the bounded token budget")
+
+                selected_chars = sum(
+                    len(item.get("content") or "")
+                    for item in details
+                    if isinstance(item, dict)
+                )
+                logger.info(
+                    "Gemini request prepared: model=%s payload_chars=%s source_chars_selected=%s selected_files=%s excluded_files=%s input_tokens=%s",
+                    model_name,
+                    len(prompt),
+                    selected_chars,
+                    sum(
+                        bool(item.get("content"))
+                        for item in details
+                        if isinstance(item, dict)
+                    ),
+                    omitted_files,
+                    token_count,
+                )
+                provider_started = time.perf_counter()
                 response = model.generate_content(prompt, generation_config=generation_config)
+                logger.info(
+                    "Gemini provider request: model=%s status=success latency_ms=%s input_tokens=%s",
+                    model_name,
+                    round((time.perf_counter() - provider_started) * 1000),
+                    token_count,
+                )
                 break
             except Exception as exc:
                 errors.append(f"{model_name}: {exc}")
+                if provider_started is None:
+                    logger.warning(
+                        "Gemini request preparation failed: model=%s error_type=%s latency_ms=%s",
+                        model_name,
+                        type(exc).__name__,
+                        round((time.perf_counter() - request_started) * 1000),
+                    )
+                else:
+                    logger.warning(
+                        "Gemini provider request: model=%s status=failure error_type=%s latency_ms=%s",
+                        model_name,
+                        type(exc).__name__,
+                        round((time.perf_counter() - provider_started) * 1000),
+                    )
 
         if response is None:
             raise RuntimeError("; ".join(errors))
@@ -160,6 +270,32 @@ Repository input:
         if not text.strip():
             raise RuntimeError("Gemini returned an empty response")
         return text
+
+    @staticmethod
+    def _fallback_reason(exc: Exception) -> str:
+        message = str(exc).lower()
+        if "not configured" in message:
+            return "gemini_credentials_not_configured"
+        if "not installed" in message:
+            return "gemini_dependency_missing"
+        if "empty response" in message or "valid json" in message or "json object" in message:
+            return "invalid_provider_response"
+        if "token budget" in message:
+            return "gemini_input_token_budget_exceeded"
+        return f"provider_or_validation_error:{type(exc).__name__}"
+
+    @staticmethod
+    def _log_analysis_sections(analysis: Dict[str, Any], fallback: bool) -> None:
+        executive = analysis.get("executive_overview")
+        architecture = analysis.get("architecture")
+        logger.info(
+            "Analysis sections complete: fallback=%s overview=%s executive_features=%s modules=%s architecture_components=%s",
+            fallback,
+            bool(analysis.get("overview")),
+            len(executive.get("user_features", [])) if isinstance(executive, dict) else 0,
+            len(analysis.get("modules", [])) if isinstance(analysis.get("modules"), list) else 0,
+            len(architecture.get("components", [])) if isinstance(architecture, dict) else 0,
+        )
 
     def _build_input_payload(
         self,
@@ -217,11 +353,22 @@ Repository input:
             "analysis_evidence": analysis_evidence,
         }
         profile = semantic_repository_profile
+        source_stats = (scan.get("source_evidence") or {}).get("stats", {})
         logger.info(
-            "Semantic profile: domains=%s selected_source=%s api_routes=%s",
-            [d.get("domain") for d in domain_signals[:5]],
-            profile.get("confidence_signals", {}).get("source_files_selected"),
-            profile.get("confidence_signals", {}).get("meaningful_routes"),
+            "Analysis payload assembled: %s",
+            {
+                "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
+                "source_chars_selected": source_stats.get("source_chars_selected", 0),
+                "selected_source_files": profile.get("confidence_signals", {}).get("source_files_selected"),
+                "routes": source_stats.get("routes_detected", 0),
+                "symbols": source_stats.get("symbols_detected", 0),
+                "models": source_stats.get("models_detected", 0),
+                "semantic_profile_item_counts": {
+                    key: len(value) if isinstance(value, (list, dict)) else 0
+                    for key, value in profile.items()
+                },
+                "domain_signals": [d.get("domain") for d in domain_signals[:5]],
+            },
         )
         return payload
 
