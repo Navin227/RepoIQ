@@ -96,14 +96,55 @@ interface DemoStartResponse {
   public_ip: string | null;
 }
 
+const normalizeGitHubRepoInput = (value: string) => {
+  const cleaned = value.trim();
+
+  if (!cleaned) return '';
+
+  const compactRepoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+  if (compactRepoPattern.test(cleaned)) {
+    return `https://github.com/${cleaned.replace(/\.git$/i, '')}`;
+  }
+
+  const sshRepoPattern = /^git@github\.com:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\.git)?$/i;
+  const sshMatch = cleaned.match(sshRepoPattern);
+  if (sshMatch) {
+    return `https://github.com/${sshMatch[1]}`;
+  }
+
+  try {
+    const parsed = new URL(cleaned);
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === 'github.com' ||
+      hostname === 'www.github.com'
+    ) {
+      const pathParts = parsed.pathname
+        .replace(/^\/+|\/+$/g, '')
+        .replace(/\.git$/i, '')
+        .split('/')
+        .filter(Boolean);
+
+      if (pathParts.length >= 2) {
+        return `https://github.com/${pathParts[0]}/${pathParts[1]}`;
+      }
+    }
+  } catch {
+    // Ignore invalid URL format.
+  }
+
+  return cleaned;
+};
+
 const getRepoFullName = (repoUrl: string) => {
   const cleaned = repoUrl.trim();
 
   if (!cleaned) return '';
 
-  if (cleaned.includes('github.com/')) {
+  const normalized = normalizeGitHubRepoInput(cleaned);
+  if (normalized.startsWith('https://github.com/')) {
     try {
-      const parsed = new URL(cleaned);
+      const parsed = new URL(normalized);
 
       const pathParts = parsed.pathname
         .replace(/^\//, '')
@@ -118,6 +159,11 @@ const getRepoFullName = (repoUrl: string) => {
     }
   }
 
+  const compactRepoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+  if (compactRepoPattern.test(cleaned)) {
+    return cleaned.replace(/\.git$/i, '');
+  }
+
   return cleaned;
 };
 
@@ -125,6 +171,16 @@ const isGitHubRepoUrl = (query: string) => {
   const cleaned = query.trim();
 
   if (!cleaned) return false;
+
+  const compactRepoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+  if (compactRepoPattern.test(cleaned)) {
+    return true;
+  }
+
+  const sshRepoPattern = /^git@github\.com:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/i;
+  if (sshRepoPattern.test(cleaned)) {
+    return true;
+  }
 
   try {
     const parsed = new URL(cleaned);
@@ -394,7 +450,8 @@ export default function App() {
     setSearchError(null);
 
     if (isGitHubRepoUrl(trimmed)) {
-      await handleAnalyze(trimmed);
+      const normalizedRepoUrl = normalizeGitHubRepoInput(trimmed);
+      await handleAnalyze(normalizedRepoUrl);
       return;
     }
 

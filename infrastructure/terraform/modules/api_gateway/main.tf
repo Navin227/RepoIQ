@@ -8,11 +8,7 @@ resource "aws_apigatewayv2_api" "demo" {
   description   = "RepoIQ Demo Infrastructure Control API"
 
   cors_configuration {
-    allow_origins = [
-      "http://localhost:3000",
-      "http://localhost:5173",
-      var.vercel_domain
-    ]
+    allow_origins = [var.frontend_origin]
     allow_methods = ["GET", "POST", "OPTIONS"]
     allow_headers = ["Content-Type", "Authorization", "X-Admin-Token"]
     max_age       = 300

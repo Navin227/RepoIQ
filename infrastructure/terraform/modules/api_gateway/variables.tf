@@ -9,8 +9,8 @@ variable "common_tags" {
   default     = {}
 }
 
-variable "vercel_domain" {
-  description = "Production Vercel domain for CORS"
+variable "frontend_origin" {
+  description = "Production frontend origin allowed by API Gateway CORS"
   type        = string
 }
 

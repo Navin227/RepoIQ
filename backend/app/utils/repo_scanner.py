@@ -1,8 +1,12 @@
 from pathlib import Path
+import logging
 import re
 from typing import Dict, Any
 
+from app.services.source_evidence_extractor import SourceEvidenceExtractor
 from app.utils.file_parser import parse_package_json, parse_requirements_txt, read_text_preview
+
+logger = logging.getLogger(__name__)
 
 
 IGNORED_DIRS = {
@@ -20,6 +24,7 @@ IGNORED_DIRS = {
     "out",
     "coverage",
     "venv",
+    ".venv",
     "env",
     "__pycache__",
     "target",
@@ -35,22 +40,42 @@ IGNORED_DIRS = {
 
 
 class RepoScanner:
+    @staticmethod
+    def _is_ignored_path(path: Path, repo_path: Path) -> bool:
+        try:
+            relative_parts = path.relative_to(repo_path).parts
+        except ValueError:
+            relative_parts = path.parts
+
+        return any(part in IGNORED_DIRS for part in relative_parts)
+
     def scan(self, repo_path: Path) -> dict:
         files = self._collect_files(repo_path)
         dependencies = self._collect_dependencies_recursive(repo_path)
         readme = self._find_readme(repo_path)
+        readme_text = read_text_preview(readme) if readme else ""
+        source_previews = self._collect_source_previews(repo_path)
+        evidence_extractor = SourceEvidenceExtractor()
+        source_evidence = evidence_extractor.extract(repo_path, files, readme=readme_text)
+        # Keep full file objects for LLM payload; bucket lists remain path-only for compatibility.
+        file_details = source_evidence.pop("selected_source_file_details", [])
+        source_evidence["selected_source_files"] = [
+            item["path"] for item in file_details if isinstance(item, dict) and item.get("path")
+        ]
         return {
             "files": files,
             "dependencies": dependencies,
-            "source_previews": self._collect_source_previews(repo_path),
-            "readme": read_text_preview(readme) if readme else "",
+            "source_previews": source_previews,
+            "readme": readme_text,
             "top_level_dirs": self._top_level_dirs(repo_path),
+            "source_evidence": source_evidence,
+            "_selected_source_file_objects": file_details,
         }
 
     def _collect_files(self, repo_path: Path) -> list[str]:
         paths = []
         for path in repo_path.rglob("*"):
-            if any(part in IGNORED_DIRS for part in path.parts):
+            if self._is_ignored_path(path, repo_path):
                 continue
             if path.is_file():
                 paths.append(path.relative_to(repo_path).as_posix())
@@ -60,7 +85,7 @@ class RepoScanner:
         dependencies = {}
 
         for path in repo_path.rglob("*"):
-            if any(part in IGNORED_DIRS for part in path.parts):
+            if self._is_ignored_path(path, repo_path):
                 continue
             if not path.is_file():
                 continue
@@ -252,7 +277,7 @@ class RepoScanner:
         for path in repo_path.rglob("*"):
             if len(previews) >= 160:
                 break
-            if any(part in IGNORED_DIRS for part in path.parts):
+            if self._is_ignored_path(path, repo_path):
                 continue
             if not path.is_file() or path.suffix.lower() not in interesting_suffixes:
                 continue

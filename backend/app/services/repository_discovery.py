@@ -174,7 +174,11 @@ def score_relevance(query: str, candidate: dict[str, Any]) -> float:
     return round(min(100.0, score), 2)
 
 
-def score_analyzability(paths: list[str], readme_present: bool = False) -> float:
+def score_analyzability(
+    paths: list[str],
+    readme_present: bool = False,
+    scan: dict[str, Any] | None = None,
+) -> float:
     normalized_paths = [
         str(path).replace("\\", "/").strip("/")
         for path in paths
@@ -224,6 +228,23 @@ def score_analyzability(paths: list[str], readme_present: bool = False) -> float
         + min(10, data_config_count * 2)
         + (5 if readme_present else 0)
     )
+
+    if isinstance(scan, dict):
+        source_evidence = scan.get("source_evidence") or {}
+        stats = source_evidence.get("stats") if isinstance(source_evidence.get("stats"), dict) else {}
+        selected = stats.get("selected_evidence_files", 0)
+        routes = stats.get("routes_detected", 0)
+        if isinstance(selected, (int, float)) and selected > 0:
+            score += min(15, int(selected) * 2)
+        if isinstance(routes, (int, float)) and routes > 0:
+            score += min(10, int(routes))
+        capability = source_evidence.get("capability_signals") or []
+        strong_domains = sum(
+            1 for s in capability
+            if isinstance(s, dict) and int(s.get("confidence") or 0) >= 50
+        )
+        score += min(8, strong_domains * 3)
+
     return float(min(100, score))
 
 
@@ -267,7 +288,15 @@ def build_analysis_evidence(
         or path.lower().startswith((".github/workflows/", "k8s/", "kubernetes/"))
     ]
     has_readme = bool(str(readme or "").strip())
-    score = score_analyzability(files, readme_present=has_readme)
+    score = score_analyzability(files, readme_present=has_readme, scan=scan)
+
+    source_evidence = scan.get("source_evidence") if isinstance(scan, dict) else {}
+    if not isinstance(source_evidence, dict):
+        source_evidence = {}
+    enriched_routes = code_signals.get("api_routes_enriched") or source_evidence.get("routes") or []
+    route_paths = code_signals.get("api_routes", [])[:80]
+    evidence_stats = source_evidence.get("stats", {}) if isinstance(source_evidence.get("stats"), dict) else {}
+    selected_evidence_paths = source_evidence.get("selected_source_files", [])[:80]
 
     return {
         "analyzability_score": score,
@@ -275,13 +304,34 @@ def build_analysis_evidence(
         "readme_available": has_readme,
         "source_file_count": len(source_files),
         "source_files": source_files[:120],
+        "selected_evidence_files": selected_evidence_paths,
+        "selected_evidence_file_count": evidence_stats.get("selected_evidence_files", len(selected_evidence_paths)),
         "dependency_and_configuration_files": dependency_files[:80],
         "infrastructure_files": infrastructure_files[:80],
         "technology_detections": technology_detections[:100],
-        "api_routes": code_signals.get("api_routes", [])[:80],
+        "api_routes": route_paths,
+        "api_routes_enriched": enriched_routes[:80],
         "service_names": code_signals.get("service_names", [])[:80],
         "controller_names": code_signals.get("controller_names", [])[:80],
         "business_file_names": code_signals.get("business_file_names", [])[:80],
+        "capability_signals": source_evidence.get("capability_signals", [])[:20],
+        "domain_signals": [
+            {
+                "domain": item.get("domain"),
+                "confidence": item.get("confidence"),
+                "signals": item.get("matched_signals", []),
+            }
+            for item in (source_evidence.get("capability_signals") or [])
+            if isinstance(item, dict)
+        ][:15],
+        "evidence_quality": {
+            "meaningful_source_files": evidence_stats.get("selected_evidence_files", 0),
+            "routes_with_handlers": len([
+                r for r in enriched_routes
+                if isinstance(r, dict) and r.get("handler")
+            ]) if enriched_routes else 0,
+            "payload_chars": evidence_stats.get("evidence_payload_chars", 0),
+        },
     }
 
 

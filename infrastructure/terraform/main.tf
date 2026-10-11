@@ -182,7 +182,7 @@ module "api_gateway" {
 
   project_name          = var.project_name
   common_tags           = var.common_tags
-  vercel_domain         = var.vercel_domain
+  frontend_origin       = var.frontend_origin
   authorizer_invoke_arn = module.lambda.authorizer_lambda_invoke_arn
   authorizer_lambda_arn = module.lambda.authorizer_lambda_arn
   start_invoke_arn      = module.lambda.start_lambda_invoke_arn

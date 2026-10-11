@@ -15,6 +15,7 @@ from app.services.github_service import GitHubService, get_github_service
 from app.services.stack_detector import StackDetector
 from app.services.repository_structure_service import RepositoryStructureService
 from app.services.llm_service import LLMService
+from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.similar_repo_service import SimilarRepoService
 from app.utils.repo_scanner import RepoScanner
 from app.utils.git_utils import normalize_github_url
@@ -68,6 +69,18 @@ def analyze_repository(
             raise HTTPException(status_code=400, detail="Either repo_url or local_path is required")
 
         scan = RepoScanner().scan(repo_path)
+        se_stats = (scan.get("source_evidence") or {}).get("stats", {})
+        if se_stats:
+            logger.info(
+                "Evidence scan summary: %s",
+                json.dumps(
+                    {
+                        "selected_files": se_stats.get("selected_evidence_files"),
+                        "routes": se_stats.get("routes_detected"),
+                        "payload_chars": se_stats.get("evidence_payload_chars"),
+                    }
+                ),
+            )
         stack = StackDetector().detect(scan)
         print("📊 DETECTED STACK (JSON):")
         print(json.dumps(stack, indent=2, default=str))
@@ -81,6 +94,13 @@ def analyze_repository(
             repository_structure=[folder_structure] if folder_structure else [],
             scan=scan,
         )
+        semantic_repository_profile = build_semantic_repository_profile(
+            repository_metadata,
+            readme_content or "",
+            stack,
+            scan,
+            llm_service._extract_code_signals(scan),
+        )
         try:
             similar_repositories = SimilarRepoService(github_service).find_similar_repositories(
                 metadata={
@@ -93,6 +113,7 @@ def analyze_repository(
                 analysis_context={
                     **ai_analysis,
                     "analysis_evidence": ai_analysis.get("analysis_evidence", {}),
+                    "semantic_repository_profile": semantic_repository_profile,
                 },
                 repository_structure=[folder_structure] if folder_structure else [],
             )

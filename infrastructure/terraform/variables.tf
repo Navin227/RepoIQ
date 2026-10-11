@@ -95,8 +95,8 @@ variable "admin_token" {
   default     = "repoiq-demo-admin-token-2026"
 }
 
-variable "vercel_domain" {
-  description = "Production Vercel domain for CORS validation"
+variable "frontend_origin" {
+  description = "Production frontend origin allowed by API Gateway CORS"
   type        = string
-  default     = "https://repoiq.vercel.app"
+  default     = "https://main.d20r18yhh140ff.amplifyapp.com"
 }

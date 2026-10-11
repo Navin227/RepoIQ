@@ -1,10 +1,12 @@
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import settings
 from app.services.repository_discovery import build_analysis_evidence
+from app.services.semantic_profile_builder import build_semantic_repository_profile
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +113,10 @@ Rules:
 - Prefer fewer high-confidence modules over many generic ones. Exclude low-confidence modules.
 - Return 5 to 10 important modules when enough evidence exists.
 - Use the repository evidence; do not invent external facts.
-- Treat analysis_evidence as the authoritative inventory of observed repository facts.
+- Treat analysis_evidence, source_evidence, and semantic_repository_profile as the authoritative inventory of observed repository facts.
+- Evidence hierarchy (strongest to weakest): (1) actual source-code evidence in source_evidence.selected_source_file_details, (2) enriched api routes with handlers, (3) services/controllers/models from source, (4) dependency and configuration files, (5) infrastructure configuration, (6) frontend implementation evidence, (7) tests, (8) README, (9) directory or file names alone.
+- If README claims contradict source_evidence, prefer source_evidence.
+- When source evidence is insufficient, use "Unable to confidently determine from repository evidence." Do not fill gaps with generic software descriptions.
 - Clearly distinguish observed facts from interpretation. README statements are weaker than source, manifest, route, or configuration evidence.
 - Do not invent technologies, modules, architecture components, or user functionality that are not supported by analysis_evidence.
 - Use exact repository paths or routes from the evidence when naming module components. Return fewer items when evidence is insufficient.
@@ -171,8 +176,18 @@ Repository input:
 
         code_signals = self._extract_code_signals(scan)
         analysis_evidence = build_analysis_evidence(scan, stack, readme, code_signals)
+        source_evidence = self._build_source_evidence_payload(scan)
+        semantic_repository_profile = build_semantic_repository_profile(
+            metadata, readme, stack, scan, code_signals
+        )
+        functional_evidence = (
+            (scan.get("source_evidence") or {}).get("capability_signals", [])
+            if isinstance(scan.get("source_evidence"), dict)
+            else []
+        )
+        domain_signals = analysis_evidence.get("domain_signals", [])
 
-        return {
+        payload = {
             "metadata": {
                 "name": metadata.get("name") or metadata.get("repo_name") or metadata.get("full_name"),
                 "full_name": metadata.get("full_name"),
@@ -186,6 +201,7 @@ Repository input:
             "file_tree": scan.get("files", [])[:500],
             "code_signals": code_signals,
             "api_routes": code_signals.get("api_routes", []),
+            "api_routes_enriched": code_signals.get("api_routes_enriched", []),
             "services": code_signals.get("service_names", []),
             "controllers": code_signals.get("controller_names", []),
             "top_level_modules": scan.get("top_level_dirs", []),
@@ -194,8 +210,29 @@ Repository input:
                 "infrastructure": infrastructure,
                 "devops": devops,
             },
+            "source_evidence": source_evidence,
+            "semantic_repository_profile": semantic_repository_profile,
+            "domain_signals": domain_signals,
+            "functional_evidence": functional_evidence,
             "analysis_evidence": analysis_evidence,
         }
+        profile = semantic_repository_profile
+        logger.info(
+            "Semantic profile: domains=%s selected_source=%s api_routes=%s",
+            [d.get("domain") for d in domain_signals[:5]],
+            profile.get("confidence_signals", {}).get("source_files_selected"),
+            profile.get("confidence_signals", {}).get("meaningful_routes"),
+        )
+        return payload
+
+    def _build_source_evidence_payload(self, scan: Dict[str, Any]) -> Dict[str, Any]:
+        raw = scan.get("source_evidence") or {}
+        details = scan.get("_selected_source_file_objects") or []
+        if not isinstance(raw, dict):
+            raw = {}
+        payload = dict(raw)
+        payload["selected_source_file_details"] = details[:45] if isinstance(details, list) else []
+        return payload
 
     def _summarize_readme(self, readme: str) -> str:
         text = " ".join((readme or "").split())
@@ -214,10 +251,19 @@ Repository input:
 
         return [trim_node(node) for node in structure[:3] if isinstance(node, dict)]
 
-    def _extract_code_signals(self, scan: Dict[str, Any]) -> Dict[str, List[str]]:
+    def _extract_code_signals(self, scan: Dict[str, Any]) -> Dict[str, Any]:
         files = [str(path) for path in scan.get("files", [])]
         dependencies = scan.get("dependencies", {})
         source_previews = scan.get("source_previews", {})
+        source_evidence = scan.get("source_evidence") or {}
+
+        enriched_routes: list[dict[str, Any]] = []
+        if isinstance(source_evidence, dict):
+            raw_routes = source_evidence.get("routes") or []
+            for item in raw_routes:
+                if isinstance(item, dict) and item.get("path"):
+                    enriched_routes.append(item)
+
         route_patterns = [
             re.compile(r'["\'](/api/[^"\']+)["\']'),
             re.compile(r'@\w+\.(?:get|post|put|delete|patch)\(["\']([^"\']+)["\']'),
@@ -229,8 +275,12 @@ Repository input:
             re.compile(r"\b(?:const|let|var)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\("),
         ]
 
-        api_routes: list[str] = []
+        api_routes: list[str] = [str(r.get("path")) for r in enriched_routes if r.get("path")]
         function_names: list[str] = []
+        for detail in scan.get("_selected_source_file_objects") or []:
+            if isinstance(detail, dict):
+                function_names.extend(detail.get("symbols") or [])
+
         evidence_blobs = [str(dep_data.get("content", "")) for dep_data in dependencies.values()]
         evidence_blobs.extend(str(content) for content in source_previews.values())
         for content in evidence_blobs:
@@ -241,14 +291,25 @@ Repository input:
 
         service_names = []
         controller_names = []
+        model_names = []
         for path in files:
             name = path.rsplit("/", 1)[-1]
             stem = name.rsplit(".", 1)[0]
             lower = path.lower()
-            if "service" in lower:
+            if re.search(r"services?/", lower) or stem.endswith("Service"):
                 service_names.append(stem)
-            if "controller" in lower:
+            if re.search(r"controllers?/", lower) or stem.endswith("Controller"):
                 controller_names.append(stem)
+            if re.search(r"(models?|entities?|schemas?)/", lower):
+                model_names.append(stem)
+
+        if isinstance(source_evidence, dict):
+            for path in source_evidence.get("services", [])[:40]:
+                service_names.append(Path(path).stem)
+            for path in source_evidence.get("controllers", [])[:40]:
+                controller_names.append(Path(path).stem)
+            for path in source_evidence.get("models", [])[:40]:
+                model_names.append(Path(path).stem)
 
         business_file_names = [
             path for path in files
@@ -260,13 +321,18 @@ Repository input:
                 re.IGNORECASE,
             )
         ][:80]
+        if isinstance(source_evidence, dict):
+            for key in ("auth_files", "storage_files", "worker_files", "frontend_pages"):
+                business_file_names.extend(source_evidence.get(key, [])[:20])
 
         return {
             "api_routes": list(dict.fromkeys(api_routes))[:80],
+            "api_routes_enriched": enriched_routes[:80],
             "service_names": list(dict.fromkeys(service_names))[:80],
             "controller_names": list(dict.fromkeys(controller_names))[:80],
+            "model_names": list(dict.fromkeys(model_names))[:80],
             "function_names": list(dict.fromkeys(function_names))[:120],
-            "business_file_names": business_file_names,
+            "business_file_names": list(dict.fromkeys(business_file_names))[:80],
             "infrastructure_files": [
                 path for path in files
                 if re.search(r"(dockerfile|docker-compose|compose\.ya?ml|\.tf$|k8s|kubernetes|helm|chart\.yaml|values\.yaml|\.github/workflows|gitlab-ci|jenkinsfile)", path, re.IGNORECASE)
@@ -308,10 +374,20 @@ Repository input:
         analysis_evidence = payload.get("analysis_evidence", {})
         evidence_paths = []
         if isinstance(analysis_evidence, dict):
-            for key in ("source_files", "infrastructure_files", "business_file_names"):
+            for key in (
+                "source_files",
+                "infrastructure_files",
+                "business_file_names",
+                "selected_evidence_files",
+            ):
                 values = analysis_evidence.get(key, [])
                 if isinstance(values, list):
                     evidence_paths.extend(values)
+        source_evidence = payload.get("source_evidence") or {}
+        if isinstance(source_evidence, dict):
+            for detail in source_evidence.get("selected_source_file_details") or []:
+                if isinstance(detail, dict) and detail.get("path"):
+                    evidence_paths.append(detail["path"])
         known_paths = {
             str(path).replace("\\", "/").lower()
             for path in [*payload.get("file_tree", []), *evidence_paths]
@@ -324,6 +400,9 @@ Repository input:
             str(route).lower()
             for route in payload.get("api_routes", [])
         }
+        for route in payload.get("api_routes_enriched") or []:
+            if isinstance(route, dict) and route.get("path"):
+                known_routes.add(str(route["path"]).lower())
         readme_evidence = str(payload.get("readme_summary") or "").lower()
         for item in modules:
             if not isinstance(item, dict):
