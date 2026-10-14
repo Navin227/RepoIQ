@@ -369,15 +369,36 @@ class GitHubService:
     ) -> dict[str, str]:
         owner, repo_name = self._owner_and_repo(repo_url)
         clone_url = f"https://github.com/{owner}/{repo_name}.git"
-        repo_dir = target_dir or Path("temp_repos") / repo_name
+
+        if target_dir is not None:
+            repo_dir = Path(target_dir)
+        else:
+            repo_dir = Path("temp_repos") / repo_name
+
+        repo_dir = repo_dir.resolve(strict=False)
+        repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
         if repo_dir.exists():
-            return {
-                "repo_name": repo_name,
-                "local_path": repo_dir.as_posix(),
-            }
+            if not repo_dir.is_dir():
+                raise RuntimeError(f"Clone target exists and is not a directory: {repo_dir}")
 
-        repo_dir.parent.mkdir(parents=True, exist_ok=True)
+            git_dir = repo_dir / ".git"
+            if git_dir.exists():
+                return {
+                    "repo_name": repo_name,
+                    "local_path": repo_dir.as_posix(),
+                }
+
+            logger.warning(
+                "Clone target already exists but is not a valid repository; preserving user data and creating a distinct clone directory."
+            )
+            suffix = 1
+            while True:
+                candidate = repo_dir.parent / f"{repo_dir.name}_{suffix}"
+                if not candidate.exists():
+                    repo_dir = candidate.resolve(strict=False)
+                    break
+                suffix += 1
 
         try:
             subprocess.run(

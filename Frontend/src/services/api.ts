@@ -364,9 +364,43 @@ export interface AnalyzeRepositoryResponse {
   architecture_summary?: string;
   modules?: BusinessModule[];
   analysis_evidence?: Record<string, unknown>;
+  analysis_status?: string;
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
   message?: string;
+}
+
+function normalizeAiInsights(result: Partial<AnalyzeRepositoryResponse>): string[] {
+  const explicit = Array.isArray(result.ai_insights)
+    ? result.ai_insights.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+
+  if (explicit.length > 0) {
+    return explicit;
+  }
+
+  const executive = result.executive_overview;
+  const featureNames = Array.isArray(executive?.user_features)
+    ? executive.user_features
+        .map((feature) => {
+          const record = (feature ?? {}) as Record<string, unknown>;
+          const name = typeof record.name === 'string' ? record.name.trim() : '';
+          return name;
+        })
+        .filter((name): name is string => name.length > 0)
+    : [];
+
+  if (featureNames.length > 0) {
+    return featureNames;
+  }
+
+  const moduleNames = Array.isArray(result.modules)
+    ? result.modules
+        .map((module) => (module && typeof module.name === 'string' ? module.name : ''))
+        .filter((name): name is string => Boolean(name && name.trim().length > 0))
+    : [];
+
+  return moduleNames.slice(0, 10);
 }
 
 export async function searchRepositories(
@@ -478,6 +512,8 @@ export async function analyzeRepository(
     console.log('📡 [API] Analysis response:', result);
 
     if (result.status === 'success') {
+      const keyFeatures = normalizeAiInsights(result);
+
       return {
         status: 'success',
         repoName: result.repo_name,
@@ -487,15 +523,16 @@ export async function analyzeRepository(
         stack: result.stack,
         folderStructure: result.folder_structure,
         projectSummary: result.architecture_summary,
-        keyFeatures: result.ai_insights || [],
+        keyFeatures,
         overview: result.overview,
         executive_overview: result.executive_overview,
         architecture: result.architecture,
         architecture_summary: result.architecture_summary,
         modules: result.modules,
         similar_repositories: result.similar_repositories,
-        analysis_evidence: result.analysis_evidence,
-        ai_insights: result.ai_insights,
+        analysis_evidence: result.analysis_evidence ?? {},
+        analysis_status: result.analysis_status,
+        ai_insights: result.ai_insights ?? keyFeatures,
         languages: result.languages,
       };
     }

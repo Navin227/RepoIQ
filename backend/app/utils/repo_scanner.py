@@ -37,6 +37,75 @@ IGNORED_DIRS = {
     "tmp",
     "temp",
 }
+MAX_REPO_INVENTORY_FILES = 2000
+ENTRYPOINT_FILENAMES = {
+    "main.py",
+    "app.py",
+    "server.py",
+    "manage.py",
+    "wsgi.py",
+    "asgi.py",
+    "main.ts",
+    "main.tsx",
+    "main.js",
+    "main.jsx",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "index.jsx",
+    "server.ts",
+    "server.js",
+    "app.ts",
+    "app.tsx",
+    "app.js",
+    "app.jsx",
+}
+HIGH_VALUE_DIRS = {
+    "api",
+    "routes",
+    "routers",
+    "controllers",
+    "services",
+    "models",
+    "repositories",
+    "migrations",
+    "middleware",
+    "auth",
+    "jobs",
+    "workers",
+    "schema",
+    "schemas",
+    "config",
+    "configs",
+    "infrastructure",
+    "deploy",
+    "terraform",
+    "k8s",
+    "helm",
+    "docker",
+    "tests",
+    "test",
+    "__tests__",
+    "spec",
+    "docs",
+    "documentation",
+}
+HIGH_VALUE_MANIFESTS = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "go.mod",
+    "cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+    "terraform.tfvars",
+}
 
 
 class RepoScanner:
@@ -72,14 +141,44 @@ class RepoScanner:
             "_selected_source_file_objects": file_details,
         }
 
+    @staticmethod
+    def _path_relevance_score(relative_path: str) -> int:
+        normalized = relative_path.replace('\\', '/')
+        name = Path(normalized).name.lower()
+        parts = [part.lower() for part in Path(normalized).parts]
+        score = 0
+
+        if name in ENTRYPOINT_FILENAMES:
+            score += 180
+        if any(part in HIGH_VALUE_DIRS for part in parts[:-1]):
+            score += 80
+        if any(part in {"routes", "router", "controllers", "services", "models", "repositories"} for part in parts):
+            score += 30
+        if name in HIGH_VALUE_MANIFESTS or name.endswith("dockerfile"):
+            score += 60
+        if any(part in {"test", "tests", "spec", "__tests__"} for part in parts):
+            score += 20
+        if normalized.endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rs", ".rb", ".php", ".cs")):
+            score += 15
+        if "auth" in normalized or "middleware" in normalized or "schema" in normalized:
+            score += 20
+        if any(part in IGNORED_DIRS for part in parts[:-1]):
+            score -= 500
+        if any(part in {"node_modules", "vendor", "dist", "build", "coverage", ".next", ".nuxt", "site-packages"} for part in parts):
+            score -= 200
+        return score
+
     def _collect_files(self, repo_path: Path) -> list[str]:
-        paths = []
+        ranked_paths: list[tuple[int, str]] = []
         for path in repo_path.rglob("*"):
             if self._is_ignored_path(path, repo_path):
                 continue
             if path.is_file():
-                paths.append(path.relative_to(repo_path).as_posix())
-        return sorted(paths)[:2000]
+                relative_path = path.relative_to(repo_path).as_posix()
+                ranked_paths.append((self._path_relevance_score(relative_path), relative_path))
+
+        ranked_paths.sort(key=lambda item: (-item[0], item[1].lower()))
+        return [relative_path for _, relative_path in ranked_paths[:MAX_REPO_INVENTORY_FILES]]
 
     def _collect_dependencies_recursive(self, repo_path: Path) -> Dict[str, Any]:
         dependencies = {}
@@ -297,12 +396,12 @@ class RepoScanner:
             relative_parts = candidate.relative_to(repo_path).parts
             if any(part.lower() in IGNORED_DIRS for part in relative_parts[:-1]):
                 continue
-            # Prefer the repository root README. Nested documentation is a fallback,
-            # not a replacement for the project's primary README.
+            # Prefer the repository root README, then a README outside documentation
+            # folders, then documentation-only README files as a fallback.
             root_rank = 0 if len(relative_parts) == 1 else 1
-            docs_rank = 0 if any(
+            docs_rank = 1 if any(
                 part.lower() in {"docs", "documentation"} for part in relative_parts[:-1]
-            ) else 1
+            ) else 0
             readme_candidates.append((root_rank, docs_rank, len(relative_parts), candidate))
         if not readme_candidates:
             return None

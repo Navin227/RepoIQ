@@ -25,7 +25,9 @@ LOW_VALUE_NAME_PATTERNS = re.compile(
 
 GENERATED_DIR_MARKERS = {
     "generated", "gen", "vendor", "third_party", "third-party",
-    "dist", "build", "out", ".next", "coverage",
+    "dist", "build", "out", ".next", ".nuxt", ".yarn", ".claude",
+    "coverage", ".cache", ".parcel-cache", ".turbo", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "www", "tmp", "temp",
 }
 
 ENTRYPOINT_NAMES = {

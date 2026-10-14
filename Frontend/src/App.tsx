@@ -576,7 +576,13 @@ export default function App() {
                 devops: [],
               },
 
-            keyFeatures: result.ai_insights || [],
+            keyFeatures:
+              (result.ai_insights && result.ai_insights.length > 0
+                ? result.ai_insights
+                : (result.executive_overview?.user_features ?? []).map(
+                    (feature) => feature?.name || ''
+                  ).filter(Boolean)
+              ).slice(0, 10),
 
             businessModules: (result.modules || []).map(
                 module => ({
@@ -629,7 +635,7 @@ export default function App() {
           architecture: result.architecture,
 
           analysisEvidence:
-            result.analysis_evidence,
+            result.analysis_evidence ?? {},
         });
 
         setAnalyzeMessageByUrl(prev => ({

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.llm_service import LLMService
+from app.services.repomix_service import RepomixContextService
 from app.services.similar_repo_service import SimilarRepoService
 
 
@@ -281,6 +282,42 @@ def test_repo_scanner_finds_nested_readme(tmp_path):
     assert (repo / "docs" / "README.md").exists()
 
 
+def test_repo_scanner_prefers_non_docs_readme_over_docs_fallback(tmp_path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    docs_dir = repo / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "README.md").write_text("# Docs\nInternal operations.", encoding="utf-8")
+    service_dir = repo / "services"
+    service_dir.mkdir()
+    (service_dir / "README.md").write_text("# Service\nThis is the main product README.", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("print('demo')\n", encoding="utf-8")
+
+    scan = __import__("app.utils.repo_scanner", fromlist=["RepoScanner"]).RepoScanner().scan(repo)
+
+    assert "main product README" in scan["readme"]
+    assert (service_dir / "README.md").resolve() == __import__("app.utils.repo_scanner", fromlist=["RepoScanner"]).RepoScanner()._find_readme(repo).resolve()
+
+
+def test_repo_scanner_keeps_relevant_files_when_inventory_is_large(tmp_path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+
+    for index in range(2500):
+        (repo / f"aaa_{index:04d}.txt").write_text("irrelevant placeholder\n", encoding="utf-8")
+
+    app_dir = repo / "zz_generated" / "src"
+    app_dir.mkdir(parents=True)
+    app_file = app_dir / "main.py"
+    app_file.write_text("def main():\n    return 'important'\n", encoding="utf-8")
+
+    scan = __import__("app.utils.repo_scanner", fromlist=["RepoScanner"]).RepoScanner().scan(repo)
+
+    assert app_file.relative_to(repo).as_posix() in scan["files"]
+    assert len(scan["files"]) <= 2000
+
+
 def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
     def fake_gemini(self, payload):
         return '{"overview":"Deployment automation for release teams.","executive_overview":{"what_is_this_project":["This project helps teams ship updates."],"why_was_it_built":"It reduces release friction.","user_features":[{"name":"Deploy changes","description":"Ship code consistently."}],"typical_use_cases":["A team releases software"],"who_is_this_for":["Engineering teams"],"why_is_it_valuable":"It saves time.","one_line_summary":"Deployment automation for product teams."},"modules":[],"architecture":{"summary":"Single service architecture","flow":["User","Frontend","API"]}}'
@@ -300,3 +337,126 @@ def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
     assert analysis["executive_overview"]["what_is_this_project"][0].startswith("This project")
     assert "GEMINI_INPUT_START" in caplog.text
     assert "GEMINI_INPUT_END" in caplog.text
+
+
+def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
+    def fake_gemini(self, payload):
+        return '''
+        {
+          "overview": "A file processing platform for authenticated users.",
+          "executive_overview": {
+            "what_is_this_project": ["This project helps people manage files in one place."],
+            "why_was_it_built": "It keeps file workflows organized.",
+            "user_features": [{
+              "name": "Upload files",
+              "description": "Add files to the platform.",
+              "evidence": ["UploadModal.tsx"]
+            }],
+            "typical_use_cases": ["A user stores files for later access."],
+            "who_is_this_for": ["Individuals"],
+            "why_is_it_valuable": "It saves time.",
+            "one_line_summary": "A simple place to manage and process files."
+          },
+          "modules": [{
+            "name": "File Upload",
+            "purpose": "Lets users add files.",
+            "components": ["UploadModal.tsx"],
+            "connected_modules": [],
+            "confidence": 90
+          }],
+          "architecture": {"summary": "Users upload files through a frontend and API.", "flow": ["User", "Frontend", "API"]}
+        }
+        '''
+
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+
+    analysis = LLMService().generate_repository_analysis(
+        metadata={"full_name": "acme/files", "description": "File tools"},
+        readme="README",
+        stack={"categories": {}},
+        repository_structure=[],
+        scan={
+            "files": ["UploadModal.tsx"],
+            "dependencies": {},
+            "source_previews": {},
+            "source_evidence": {"selected_source_file_details": [{"path": "UploadModal.tsx", "role": "frontend_component"}]},
+        },
+    )
+
+    assert analysis["analysis_status"] == "ai_generated"
+    assert analysis["ai_insights"]
+    assert "Upload files" in analysis["ai_insights"][0]
+
+
+def test_llm_service_drops_architecture_components_without_repo_evidence():
+    service = LLMService()
+    payload = {
+        "file_tree": ["src/app.py", "src/auth.py"],
+        "api_routes": [],
+        "api_routes_enriched": [],
+        "top_level_modules": ["src"],
+        "analysis_evidence": {"source_files": ["src/app.py", "src/auth.py"]},
+    }
+    analysis = service._normalize_analysis(
+        {
+            "overview": "A project for user identity and file flows.",
+            "executive_overview": {
+                "what_is_this_project": ["This project manages identities and files."],
+                "why_was_it_built": "It streamlines file workflows.",
+                "user_features": [{"name": "Upload files", "description": "Upload a file.", "evidence": ["src/app.py"]}],
+                "typical_use_cases": ["Use the service to manage files."],
+                "who_is_this_for": ["Teams"],
+                "why_is_it_valuable": "It keeps tasks organized.",
+                "one_line_summary": "Identity and file management.",
+            },
+            "modules": [{
+                "name": "Authentication",
+                "purpose": "Handles identity and signed-in users.",
+                "components": ["src/auth.py"],
+                "confidence": 90,
+            }],
+            "architecture": {
+                "summary": "User requests are routed to the auth service and app layer.",
+                "architecture_type": "Monolith",
+                "flow": ["User", "Frontend", "API"],
+                "components": [
+                    {"name": "src/fake/payment-service.ts", "responsibility": "Processes payments."},
+                    {"name": "API Gateway", "responsibility": "Routes requests to the backend."},
+                ],
+                "communication": ["HTTP"],
+                "deployment": "Docker",
+            },
+        },
+        payload,
+    )
+
+    assert analysis["modules"][0]["name"] == "Authentication"
+    assert [component["name"] for component in analysis["architecture"]["components"]] == ["API Gateway"]
+
+
+def test_repomix_context_is_optional_and_secure(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def fake_which(name):
+        return "npx" if name == "npx" else None
+
+    class DummyResult:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(command, capture_output, text, timeout, check):
+        output_file = Path(command[-1])
+        output_file.write_text("# Repomix\nThis repo contains a CLI app.", encoding="utf-8")
+        return DummyResult(0, stdout="Repomix summary")
+
+    monkeypatch.setattr("app.services.repomix_service.shutil.which", fake_which)
+    monkeypatch.setattr("app.services.repomix_service.subprocess.run", fake_run)
+
+    context = RepomixContextService().collect_context(repo)
+
+    assert context["source"] == "repomix"
+    assert "CLI app" in context["content"]
+    assert str(repo) not in context["path"]

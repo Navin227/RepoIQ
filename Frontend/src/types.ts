@@ -169,6 +169,7 @@ export interface AnalysisResult {
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
   analysis_evidence?: Record<string, unknown>;
+  analysis_status?: string;
   languages?: string[]; // Add languages
   error?: string;
 }

@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -104,13 +105,33 @@ def analyze_repository(
         folder_structure = RepositoryStructureService().build_tree(repo_path)
 
         llm_service = LLMService()
-        ai_analysis = llm_service.generate_repository_analysis(
-            metadata=repository_metadata,
-            readme=readme_content or "",
-            stack=stack,
-            repository_structure=[folder_structure] if folder_structure else [],
-            scan=scan,
-        )
+        try:
+            signature = inspect.signature(llm_service.generate_repository_analysis)
+            if "repo_path" in signature.parameters:
+                ai_analysis = llm_service.generate_repository_analysis(
+                    metadata=repository_metadata,
+                    readme=readme_content or "",
+                    stack=stack,
+                    repository_structure=[folder_structure] if folder_structure else [],
+                    scan=scan,
+                    repo_path=repo_path,
+                )
+            else:
+                ai_analysis = llm_service.generate_repository_analysis(
+                    metadata=repository_metadata,
+                    readme=readme_content or "",
+                    stack=stack,
+                    repository_structure=[folder_structure] if folder_structure else [],
+                    scan=scan,
+                )
+        except TypeError:
+            ai_analysis = llm_service.generate_repository_analysis(
+                metadata=repository_metadata,
+                readme=readme_content or "",
+                stack=stack,
+                repository_structure=[folder_structure] if folder_structure else [],
+                scan=scan,
+            )
         semantic_repository_profile = build_semantic_repository_profile(
             repository_metadata,
             readme_content or "",
@@ -177,6 +198,11 @@ def analyze_repository(
             db.commit()
             db.refresh(repository)
 
+        ai_insights = ai_analysis.get("ai_insights") or llm_service.generate_ai_insights(ai_analysis)
+        analysis_status = ai_analysis.get("analysis_status") or (
+            "fallback" if not ai_analysis.get("overview") else "ai_generated"
+        )
+
         return AnalyzeResponse(
             status="success",
             repository_id=repository.id if repository else None,
@@ -193,10 +219,11 @@ def analyze_repository(
             architecture_summary=llm_service.architecture_summary_text(ai_analysis),
             modules=ai_analysis["modules"],
             analysis_evidence=ai_analysis.get("analysis_evidence"),
-            ai_insights=[],
+            ai_insights=ai_insights,
+            analysis_status=analysis_status,
             similar_repositories=similar_repositories,
         )
     except ValueError as e:
-        return AnalyzeResponse(status="error", message=str(e))
+        return AnalyzeResponse(status="error", analysis_status="error", message=str(e))
     except RuntimeError as e:
-        return AnalyzeResponse(status="error", message=str(e))
+        return AnalyzeResponse(status="error", analysis_status="error", message=str(e))

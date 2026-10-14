@@ -25,4 +25,5 @@ class AnalyzeResponse(BaseModel):
     ai_insights: Optional[List[str]] = None
     similar_repositories: Optional[List[Dict[str, Any]]] = None
     analysis_evidence: Optional[Dict[str, Any]] = None
+    analysis_status: Optional[str] = None
     message: Optional[str] = None

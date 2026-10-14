@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
 from app.config import settings
+from app.services.repomix_service import RepomixContextService
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.source_evidence_extractor import redact_secrets
@@ -27,9 +28,10 @@ class LLMService:
         stack: Dict[str, Any],
         repository_structure: List[Dict[str, Any]],
         scan: Dict[str, Any],
+        repo_path: str | Path | None = None,
     ) -> Dict[str, Any]:
         payload = self._build_input_payload(
-            metadata, readme, stack, repository_structure, scan
+            metadata, readme, stack, repository_structure, scan, repo_path=repo_path
         )
         payload["analysis_id"] = str(
             payload.get("analysis_id") or uuid.uuid4().hex[:12]
@@ -54,6 +56,8 @@ class LLMService:
             generated = self._parse_json_response(response_text)
             analysis = self._normalize_analysis(generated, payload)
             analysis["analysis_evidence"] = payload["analysis_evidence"]
+            analysis["ai_insights"] = self.generate_ai_insights(analysis)
+            analysis["analysis_status"] = "ai_generated"
             self._log_analysis_sections(analysis, fallback=False)
             logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=success", analysis_id)
             return analysis
@@ -64,6 +68,9 @@ class LLMService:
                 analysis_id,
             )
             analysis = self._fallback_analysis(payload)
+            analysis["analysis_evidence"] = payload["analysis_evidence"]
+            analysis["ai_insights"] = self.generate_ai_insights(analysis)
+            analysis["analysis_status"] = "fallback"
             self._log_analysis_sections(analysis, fallback=True)
             logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=fallback", analysis_id)
             return analysis
@@ -414,6 +421,7 @@ Rules:
         stack: Dict[str, Any],
         repository_structure: List[Dict[str, Any]],
         scan: Dict[str, Any],
+        repo_path: str | Path | None = None,
     ) -> Dict[str, Any]:
         categories = stack.get("categories", {}) if isinstance(stack, dict) else {}
         cloud = categories.get("cloud", [])
@@ -436,6 +444,7 @@ Rules:
         )
 
         readme_text = str(readme or "")
+        repomix_context = self._collect_repomix_context(repo_path)
         payload = {
             "analysis_id": str(metadata.get("analysis_id") or uuid.uuid4().hex[:12]),
             "metadata": {
@@ -473,6 +482,7 @@ Rules:
             "domain_signals": analysis_evidence.get("domain_signals", []),
             "functional_evidence": functional_evidence,
             "analysis_evidence": analysis_evidence,
+            "repomix_context": repomix_context,
         }
 
         stats = scan_evidence.get("stats", {}) if isinstance(scan_evidence, dict) else {}
@@ -499,6 +509,13 @@ Rules:
             },
         )
         return payload
+
+    def _collect_repomix_context(self, repo_path: str | Path | None) -> Dict[str, Any]:
+        try:
+            return RepomixContextService().collect_context(repo_path) or {}
+        except Exception:
+            logger.warning("Repomix context collection failed; falling back to repository scan.", exc_info=True)
+            return {}
 
     def _build_source_evidence_payload(self, scan: Dict[str, Any]) -> Dict[str, Any]:
         raw = scan.get("source_evidence") or {}
@@ -694,6 +711,15 @@ Rules:
 
         return text.lower()
 
+    @staticmethod
+    def _looks_like_repo_path(token: str) -> bool:
+        text = str(token or "").strip().strip(".,;:()[]{}'")
+        if not text:
+            return False
+        if "/" in text:
+            return True
+        return bool(re.search(r"(?:^|/)[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}$", text))
+
     def _normalize_analysis(
         self, analysis: Dict[str, Any], payload: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -837,7 +863,7 @@ Rules:
 
         # Invalid module candidates should not invalidate otherwise valid
         # overview and architecture sections. An empty module list is valid.
-        normalized_architecture = self._normalize_architecture(architecture)
+        normalized_architecture = self._normalize_architecture(architecture, payload)
 
         return {
             "overview": overview,
@@ -847,7 +873,7 @@ Rules:
         }
 
     def _normalize_architecture(
-        self, architecture: Dict[str, Any]
+        self, architecture: Dict[str, Any], payload: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
         summary = str(
             architecture.get("architecture_summary")
@@ -863,6 +889,21 @@ Rules:
         )
 
         components = []
+        known_repo_paths: set[str] = set()
+        if isinstance(payload, dict):
+            known_repo_paths.update(
+                self._normalize_evidence_path(path)
+                for path in payload.get("file_tree", [])
+                if isinstance(path, str)
+            )
+            evidence = payload.get("analysis_evidence")
+            if isinstance(evidence, dict):
+                known_repo_paths.update(
+                    self._normalize_evidence_path(path)
+                    for path in evidence.get("source_files", [])
+                    if isinstance(path, str)
+                )
+
         raw_components = architecture.get("components", [])
         if isinstance(raw_components, list):
             seen_components = set()
@@ -873,6 +914,28 @@ Rules:
                 name = str(item.get("name") or "").strip()
                 responsibility = str(item.get("responsibility") or "").strip()
                 if not name or not responsibility:
+                    continue
+
+                component_ref = f"{name} {responsibility}".strip()
+                path_like_tokens = [
+                    token for token in re.split(r"[\s/]+", component_ref)
+                    if self._looks_like_repo_path(token)
+                ]
+                if path_like_tokens and known_repo_paths:
+                    normalized = {
+                        self._normalize_evidence_path(token)
+                        for token in path_like_tokens
+                    }
+                    if normalized and not normalized.intersection(known_repo_paths):
+                        continue
+                elif name and not path_like_tokens and not any(
+                    keyword in name.casefold()
+                    for keyword in (
+                        "api", "gateway", "frontend", "backend", "worker",
+                        "database", "cache", "queue", "storage", "auth",
+                        "service", "db", "server", "client", "worker",
+                    )
+                ):
                     continue
 
                 key = name.casefold()
@@ -2153,4 +2216,59 @@ Rules:
         return self.architecture_summary_text(analysis)
 
     def generate_ai_insights(self, *args: Any, **kwargs: Any) -> List[str]:
-        return []
+        analysis: Dict[str, Any] | None = kwargs.get("analysis")
+        if analysis is None and args:
+            candidate = args[0]
+            if isinstance(candidate, dict):
+                analysis = candidate
+        if analysis is None:
+            analysis = {
+                "overview": kwargs.get("overview"),
+                "executive_overview": kwargs.get("executive_overview"),
+                "modules": kwargs.get("modules"),
+            }
+
+        if not isinstance(analysis, dict):
+            return []
+
+        insight_candidates: List[str] = []
+        executive = analysis.get("executive_overview")
+        if isinstance(executive, dict):
+            raw_features = executive.get("user_features")
+            if isinstance(raw_features, list):
+                for feature in raw_features:
+                    if not isinstance(feature, dict):
+                        continue
+                    name = str(feature.get("name") or "").strip()
+                    description = str(feature.get("description") or "").strip()
+                    if name and description:
+                        insight_candidates.append(f"{name}: {description}")
+                    elif name:
+                        insight_candidates.append(name)
+
+        for module in analysis.get("modules") or []:
+            if not isinstance(module, dict):
+                continue
+            name = str(module.get("name") or "").strip()
+            purpose = str(module.get("purpose") or module.get("description") or "").strip()
+            if not name:
+                continue
+            if purpose:
+                insight_candidates.append(f"{name}: {purpose}")
+            else:
+                insight_candidates.append(name)
+
+        overview = str(analysis.get("overview") or "").strip()
+        if overview and not insight_candidates:
+            insight_candidates.append(overview)
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for entry in insight_candidates:
+            cleaned = re.sub(r"\s+", " ", entry).strip()
+            if not cleaned or cleaned.lower() in seen:
+                continue
+            seen.add(cleaned.lower())
+            deduped.append(cleaned)
+
+        return deduped[:10]
