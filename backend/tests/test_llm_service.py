@@ -20,11 +20,14 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
             ],
             "why_was_it_built": "It was built to make file handling easier for people who need a central place to manage their work.",
             "user_features": [
-              {"name": "Upload Files", "description": "Add files to the platform."},
-              {"name": "Manage Files", "description": "Keep files organized."},
-              {"name": "Sign In", "description": "Access a personal account."},
-              {"name": "Track Work", "description": "Follow file processing progress."},
-              {"name": "Use Tools", "description": "Run available file actions."}
+              {"name": "Upload Files", "description": "Add files to the platform.", "evidence": ["UploadModal.tsx"]},
+              {"name": "Manage Files", "description": "Keep files organized.", "evidence": ["pages/Auth.tsx"]},
+              {"name": "Sign In", "description": "Access a personal account.", "evidence": ["auth/context.tsx"]},
+              {"name": "Track Work", "description": "Follow file processing progress.", "evidence": ["worker.py"]},
+              {"name": "Use Tools", "description": "Run available file actions.", "evidence": ["main.tf"]},
+              {"name": "Frontend", "description": "A user interface.", "evidence": ["pages/Auth.tsx"]},
+              {"name": ".Claude", "description": "Repository configuration.", "evidence": ["README.md"]},
+              {"name": "Storage", "description": "A persistence layer.", "evidence": ["s3/main.tf"]}
             ],
             "typical_use_cases": ["A user stores files for later access."],
             "who_is_this_for": ["Individuals", "Teams"],
@@ -76,7 +79,8 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
 
     assert analysis["overview"].startswith("A file processing")
     assert analysis["executive_overview"]["what_is_this_project"][0].startswith("This project")
-    assert len(analysis["executive_overview"]["user_features"]) == 5
+    assert len(analysis["executive_overview"]["user_features"]) == 4
+    assert analysis["executive_overview"]["user_features"][0]["evidence"] == ["UploadModal.tsx"]
     assert analysis["modules"][0]["name"] == "Authentication"
     assert analysis["modules"][0]["purpose"] == "Handles user identity and protected access."
     assert analysis["modules"][0]["capabilities"] == ["Sign in users", "Protect private workflows", "Track current user"]
@@ -171,6 +175,40 @@ def test_fallback_architecture_uses_supported_architecture_type():
     analysis = service._fallback_analysis(payload)
 
     assert analysis["architecture"]["architecture_type"] == "Layered"
+
+
+def test_fallback_overview_and_features_use_readme_product_evidence():
+    service = LLMService()
+    payload = service._build_input_payload(
+        {"full_name": "acme/catalog", "description": "Repository tooling"},
+        (
+            "# Acme Catalog\n\n"
+            "Acme Catalog helps independent shops publish and manage their "
+            "online product catalogs.\n\n"
+            "## Features\n"
+            "- **Publish products**: Create product pages and share them with customers.\n"
+            "- **Track orders**: Review incoming customer orders in one place.\n\n"
+            "## Installation\nRun the development server."
+        ),
+        {"categories": {}},
+        [],
+        {
+            "files": ["src/products.ts", "src/orders.ts"],
+            "dependencies": {},
+            "source_previews": {},
+        },
+    )
+
+    analysis = service._fallback_analysis(payload)
+    executive = analysis["executive_overview"]
+
+    assert "publish and manage their online product catalogs" in analysis["overview"]
+    assert "independent shops" in executive["what_is_this_project"][0]
+    assert [feature["name"] for feature in executive["user_features"]] == [
+        "Publish products",
+        "Track orders",
+    ]
+    assert all(feature["evidence"] == ["README.md"] for feature in executive["user_features"])
 
 
 def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch):

@@ -3,7 +3,7 @@ import logging
 import re
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
 from app.config import settings
@@ -94,7 +94,11 @@ Use exactly these top-level fields:
   "executive_overview": {
     "what_is_this_project": ["Non-technical explanation of the project."],
     "why_was_it_built": "The user problem supported by repository evidence.",
-    "user_features": [{"name": "Feature", "description": "One-line description"}],
+    "user_features": [{
+      "name": "User action or capability",
+      "description": "What a user can do and the result.",
+      "evidence": ["Exact source file path or README.md"]
+    }],
     "typical_use_cases": ["Evidence-supported use case."],
     "who_is_this_for": ["Evidence-supported audience."],
     "why_is_it_valuable": "Practical value supported by evidence.",
@@ -136,6 +140,17 @@ Rules:
 - Do not invent features, modules, technologies, components or deployment
   details. Use the supplied unknown value whenever evidence is insufficient.
 - Executive overview must be non-technical.
+- Read the README's project description, feature list, and usage instructions
+  before drafting the overview. Explain the actual product and concrete user
+  workflows; do not pad the overview with generic statements about repository
+  contents, folders, or application layers.
+- Every user_features item must describe a user-visible action or outcome,
+  not a technology, directory, package, or architectural layer. Include
+  evidence: exact implementation source paths or README.md that supports it.
+  Return no feature when the repository does not provide supporting evidence.
+- Typical use cases must explain how a user would use the product, based on
+  README instructions or observed application flows. Do not invent audiences
+  or workflows.
 - Modules must represent actual functional capabilities, not generic folders
   or layers such as backend, frontend, services, controllers or utils.
 - Prefer distinct capabilities when supported by routes, source symbols and
@@ -761,6 +776,11 @@ Rules:
                 or not purpose
                 or confidence < 50
                 or self._is_generic_module_name(name)
+                or name.casefold() in {
+                    str(directory).strip().casefold()
+                    for directory in payload.get("top_level_modules", [])
+                    if isinstance(directory, str)
+                }
             ):
                 continue
 
@@ -912,12 +932,26 @@ Rules:
 
     @staticmethod
     def _is_generic_module_name(name: str) -> bool:
-        return name.strip().lower() in {
+        normalized = name.strip().lower()
+        return normalized.startswith(".") or normalized in {
             "backend", "frontend", "services", "service", "controllers",
             "controller", "utils", "utilities", "helpers", "components",
             "pages", "src", "app", "api", "routes", "models", "schemas",
-            "lib", "config",
+            "lib", "config", "www", "web", "infra", "infrastructure",
+            "docs", "documentation", "tests", "test", "packages",
         }
+
+    @staticmethod
+    def _matches_repository_directory(name: str, payload: Dict[str, Any]) -> bool:
+        def normalize(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+        normalized_name = normalize(name.strip())
+        return bool(normalized_name) and any(
+            normalized_name == normalize(directory.strip())
+            for directory in payload.get("top_level_modules", [])
+            if isinstance(directory, str)
+        )
 
     def _normalize_executive_overview(
         self, data: Any, payload: Dict[str, Any]
@@ -937,6 +971,7 @@ Rules:
         if not isinstance(paragraphs, list):
             paragraphs = []
 
+        feature_paths = self._feature_evidence_paths(payload)
         features = []
         raw_features = data.get("user_features", [])
         if isinstance(raw_features, list):
@@ -945,10 +980,32 @@ Rules:
                     continue
                 name = str(item.get("name") or "").strip()
                 description = str(item.get("description") or "").strip()
-                if name and description:
-                    features.append(
-                        {"name": name, "description": description}
-                    )
+                raw_evidence = item.get("evidence", [])
+                if isinstance(raw_evidence, str):
+                    raw_evidence = [raw_evidence]
+                if not isinstance(raw_evidence, list):
+                    continue
+
+                supported_evidence = []
+                for reference in raw_evidence:
+                    normalized = self._normalize_evidence_path(reference)
+                    route = self._normalize_evidence_path(reference, route=True)
+                    if normalized in feature_paths or route in feature_paths:
+                        supported_evidence.append(str(reference).strip())
+
+                if (
+                    name
+                    and description
+                    and not self._is_generic_module_name(name)
+                    and not self._matches_repository_directory(name, payload)
+                    and name.strip().lower() not in {"storage", "database", "platform"}
+                    and supported_evidence
+                ):
+                    features.append({
+                        "name": name,
+                        "description": description,
+                        "evidence": list(dict.fromkeys(supported_evidence))[:4],
+                    })
 
         use_cases = data.get("typical_use_cases", [])
         if isinstance(use_cases, str):
@@ -988,10 +1045,66 @@ Rules:
         fallback = self._fallback_executive_overview(
             payload, self._fallback_modules(payload)
         )
+        if not normalized["user_features"]:
+            normalized["user_features"] = fallback["user_features"]
         for key, value in fallback.items():
             if not normalized.get(key):
                 normalized[key] = value
         return normalized
+
+    def _feature_evidence_paths(self, payload: Dict[str, Any]) -> set[str]:
+        """Return implementation files, API routes, and README allowed as feature evidence."""
+        evidence_paths: set[str] = set()
+        source_evidence = payload.get("source_evidence") or {}
+        if isinstance(source_evidence, dict):
+            functional_roles = {
+                "entrypoint", "api_route", "controller", "service", "model",
+                "repository", "database", "auth", "storage", "frontend_page",
+                "frontend_component", "frontend_hook", "worker", "middleware",
+            }
+            for item in source_evidence.get("selected_source_file_details", []):
+                if not isinstance(item, dict) or item.get("role") not in functional_roles:
+                    continue
+                path = self._normalize_evidence_path(item.get("path"))
+                if path:
+                    evidence_paths.add(path)
+
+            for route in source_evidence.get("routes", []):
+                if isinstance(route, dict):
+                    path = self._normalize_evidence_path(route.get("path"), route=True)
+                    if path:
+                        evidence_paths.add(path)
+
+        evidence = payload.get("analysis_evidence") or {}
+        if isinstance(evidence, dict):
+            for route in evidence.get("api_routes", []):
+                path = self._normalize_evidence_path(route, route=True)
+                if path:
+                    evidence_paths.add(path)
+
+        # Keep feature citations usable for callers that provide only the
+        # repository file inventory rather than extractor role metadata.
+        source_suffixes = {
+            ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java",
+            ".js", ".jsx", ".kt", ".php", ".py", ".rb", ".rs", ".swift",
+            ".ts", ".tsx", ".vue", ".svelte",
+        }
+        for path in payload.get("file_tree", []):
+            normalized = self._normalize_evidence_path(path)
+            if (
+                normalized
+                and PurePosixPath(normalized).suffix.lower() in source_suffixes
+                and not re.search(r"(^|/)(tests?|__tests__|spec)(/|$)", normalized)
+            ):
+                evidence_paths.add(normalized)
+
+        if str(payload.get("readme_text") or "").strip():
+            readme_path = self._readme_evidence_path(payload)
+            if readme_path:
+                evidence_paths.add(
+                    self._normalize_evidence_path(readme_path)
+                )
+        return evidence_paths
 
     def _fallback_analysis(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         metadata = payload.get("metadata") or {}
@@ -1004,6 +1117,8 @@ Rules:
             metadata.get("full_name") or metadata.get("name") or "This repository"
         )
         description = str(metadata.get("description") or "").strip()
+        readme_summary = self._readme_product_summary(payload)
+        project_summary = readme_summary or description
         evidence = payload.get("analysis_evidence", {})
         source_count = (
             evidence.get("source_file_count", 0)
@@ -1016,11 +1131,9 @@ Rules:
             else []
         )
 
-        if description:
+        if project_summary:
             overview = (
-                f"{project_name} is described as {description}. "
-                f"Analysis found {source_count} source files and "
-                f"{len(detections)} concrete technology detections."
+                f"{project_name}: {project_summary}"
             )
         else:
             overview = (
@@ -1084,6 +1197,7 @@ Rules:
             metadata.get("full_name") or metadata.get("name") or "This project"
         )
         description = str(metadata.get("description") or "").strip()
+        readme_summary = self._readme_product_summary(payload)
         evidence = payload.get("analysis_evidence", {})
         source_count = (
             evidence.get("source_file_count", 0)
@@ -1092,23 +1206,27 @@ Rules:
         )
 
         summary = (
-            f"{project_name} is described as {description}."
+            readme_summary
+            if readme_summary
+            else f"{project_name} is described as {description}."
             if description
             else f"Available repository evidence is insufficient to determine "
                  f"what {project_name} is intended to do."
         )
         paragraphs = [summary]
-        if source_count:
-            paragraphs.append(
-                f"The repository contains {source_count} source files available "
-                "for inspection."
-            )
 
-        features = [
-            {"name": item["name"], "description": item["description"]}
-            for item in modules
-            if item.get("name") and item.get("description") and item.get("evidence")
-        ][:8]
+        features = self._readme_features(payload)
+        if not features:
+            features = [
+                {
+                    "name": item["name"],
+                    "description": item["description"],
+                    "evidence": item["evidence"],
+                }
+                for item in modules
+                if item.get("name") and item.get("description") and item.get("evidence")
+            ]
+        features = features[:8]
 
         return {
             "what_is_this_project": paragraphs,
@@ -1123,12 +1241,121 @@ Rules:
                 "value to users."
             ),
             "one_line_summary": (
-                f"{project_name}: {description}"
-                if description
+                f"{project_name}: {readme_summary or description}"
+                if readme_summary or description
                 else f"{project_name}: user-facing purpose is not clear from "
                      "the available repository evidence."
             ),
         }
+
+    @staticmethod
+    def _clean_readme_text(line: str) -> str:
+        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
+        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = text.replace("`", "").replace("**", "").replace("__", "")
+        return " ".join(text.split()).strip(" -*#>|")
+
+    def _readme_product_summary(self, payload: Dict[str, Any]) -> str:
+        readme = str(payload.get("readme_text") or "")
+        if not readme.strip():
+            return ""
+
+        blocks: list[str] = []
+        current: list[str] = []
+        in_code_block = False
+        for raw_line in readme.splitlines():
+            line = raw_line.strip()
+            if line.startswith("```") or line.startswith("~~~"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            if not line:
+                if current:
+                    blocks.append(" ".join(current))
+                    current = []
+                continue
+            if line.startswith("#"):
+                if current:
+                    blocks.append(" ".join(current))
+                    current = []
+                continue
+            if re.match(r"^(?:[-*_]\s*){3,}$", line) or "shields.io" in line.lower():
+                continue
+            cleaned = self._clean_readme_text(line)
+            if cleaned and not cleaned.startswith(("http://", "https://")):
+                current.append(cleaned)
+        if current:
+            blocks.append(" ".join(current))
+
+        for block in blocks:
+            if len(block) < 35:
+                continue
+            if re.search(
+                r"\b(install|installation|contribut|license|prerequisite|"
+                r"quick start|getting started|development setup)\b",
+                block[:100].lower(),
+            ):
+                continue
+            sentences = re.split(r"(?<=[.!?])\s+", block)
+            summary = " ".join(sentences[:3]).strip()
+            return summary[:900].rstrip()
+        return ""
+
+    def _readme_evidence_path(self, payload: Dict[str, Any]) -> str:
+        readme_paths = [
+            path
+            for path in payload.get("file_tree", [])
+            if isinstance(path, str)
+            and PurePosixPath(path).name.lower().startswith("readme.")
+        ]
+        if readme_paths:
+            root_readme = next(
+                (path for path in readme_paths if "/" not in path.replace("\\", "/")),
+                None,
+            )
+            selected = root_readme or readme_paths[0]
+            return selected.replace("\\", "/")
+        return "README.md" if str(payload.get("readme_text") or "").strip() else ""
+
+    def _readme_features(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        readme = str(payload.get("readme_text") or "")
+        if not readme.strip():
+            return []
+
+        in_feature_section = False
+        features = []
+        for raw_line in readme.splitlines():
+            line = raw_line.strip()
+            if line.startswith("#"):
+                heading = self._clean_readme_text(line.lstrip("#")).lower()
+                in_feature_section = bool(
+                    re.search(r"\b(features?|capabilities|what you can do|"
+                              r"key functionality|highlights)\b", heading)
+                )
+                continue
+            if not in_feature_section or not re.match(r"^(?:[-*+]|\d+[.)])\s+", line):
+                continue
+            text = self._clean_readme_text(re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line))
+            if len(text) < 16:
+                continue
+            name_match = re.match(r"^([^:—–-]{3,48})\s*[:—–-]\s*(.+)$", text)
+            if name_match:
+                name, description = name_match.groups()
+            else:
+                name = " ".join(text.split()[:5]).rstrip(".,;:")
+                description = text
+            if self._is_generic_module_name(name):
+                continue
+            features.append({
+                "name": name,
+                "description": description[:280],
+                "evidence": [self._readme_evidence_path(payload)],
+            })
+            if len(features) == 8:
+                break
+        return features
 
     @staticmethod
     def _category_names(categories: Dict[str, Any]) -> Dict[str, List[str]]:

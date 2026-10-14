@@ -550,6 +550,11 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                   <span className="text-[10px] font-mono font-bold text-indigo-400">FEATURE 0{idx + 1}</span>
                   <h5 className="font-bold text-sm text-white mt-1.5">{feature.name}</h5>
                   <p className="text-xs text-gray-400 mt-2 leading-relaxed">{feature.description}</p>
+                  {feature.evidence && feature.evidence.length > 0 && (
+                    <p className="text-[10px] text-gray-500 mt-3 font-mono break-all">
+                      Evidence: {feature.evidence.slice(0, 2).join(', ')}
+                    </p>
+                  )}
                 </div>
               )) : (
                 <p className="text-sm text-gray-400 col-span-full">{UNKNOWN_EVIDENCE}</p>

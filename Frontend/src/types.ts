@@ -104,6 +104,7 @@ export interface ExecutiveOverview {
   user_features: Array<{
     name: string;
     description: string;
+    evidence?: string[];
   }>;
   typical_use_cases: string[];
   who_is_this_for: string[];

@@ -63,7 +63,7 @@ backend/
 
 `app/services/stack_detector.py` detects frontend, backend, database, and infrastructure stack from files and dependency manifests.
 
-`app/services/llm_service.py` generates repository overview, module breakdown, and architecture summary. The current implementation is a safe MVP placeholder where OpenAI or Gemini calls can be added.
+`app/services/llm_service.py` generates repository overviews, user workflows, evidence-backed feature cards, module breakdowns, and architecture summaries with Gemini. It grounds the analysis in README content and selected source evidence, rejects unsupported feature references and folder names, and uses README-derived summaries and features when Gemini is unavailable.
 
 `app/services/similar_repo_service.py` recommends similar repositories using GitHub search based on repository name, language, and detected stack.
 
@@ -164,7 +164,7 @@ Call relationships:
 7. `GitHubService.clone_repository` clones the repository into `CLONE_BASE_DIR`.
 8. `RepoScanner.scan` extracts file paths, dependencies, README preview, and top-level folders.
 9. `StackDetector.detect` returns frontend, backend, database, and infrastructure stack.
-10. `LLMService` generates overview, module breakdown, and architecture summary.
+10. `LLMService` analyzes the README and selected source evidence to generate the user-facing overview, supported features and use cases, functional modules, and architecture summary.
 11. `SimilarRepoService` searches GitHub for related repositories.
 12. `AnalysisService` stores `Repository` and `AnalysisResult` in PostgreSQL.
 13. `AnalysisService` marks the `AnalysisJob` as `completed`.
