@@ -20,6 +20,12 @@ export interface TechStack {
   tooling?: TechItem[];
 }
 
+export interface RawTechStack {
+  categories?: Partial<TechStack>;
+  flat?: Partial<TechStack>;
+  languages?: string[];
+}
+
 export interface FileTreeNode {
   name: string;
   type: "file" | "folder";
@@ -32,29 +38,29 @@ export interface Repository {
   name: string;
   fullName: string;
   description: string;
-  stars: number;
-  forks: number;
-  language: string;
-  topics: string[];
+  stars?: number;
+  forks?: number;
+  language?: string;
+  topics?: string[];
   url: string;
   localPath?: string;
   readme?: string;
   overview: {
     aiSummary: string;
     executiveOverview?: ExecutiveOverview;
-    info: {
+    info?: {
       license: string;
       contributors: number;
       openIssues: number;
       lastCommit: string;
     };
-    stats: {
+    stats?: {
       linesOfCode: string;
       filesCount: number;
       commitsCount: string;
       pullRequests: number;
     };
-    topics: string[];
+    topics?: string[];
   };
   analysis: {
     projectSummary: string;
@@ -65,7 +71,7 @@ export interface Repository {
   folderStructure: FileTreeNode[];
   similarRepos: SimilarRepo[];
   languages?: string[];
-  rawStack?: any;
+  rawStack?: RawTechStack;
   architecture?: ArchitectureAnalysis;
   analysisEvidence?: Record<string, unknown>;
 }
@@ -74,6 +80,9 @@ export interface ArchitectureComponent {
   name: string;
   responsibility: string;
   connected_to: string[];
+  input?: string;
+  output?: string;
+  communicates_with?: string[];
 }
 
 export interface ArchitectureAnalysis {
@@ -85,6 +94,8 @@ export interface ArchitectureAnalysis {
   components: ArchitectureComponent[];
   communication: string[];
   deployment: string;
+  sync_path?: string[];
+  async_path?: string[];
 }
 
 export interface ExecutiveOverview {
@@ -107,7 +118,7 @@ export interface BusinessModule {
   capabilities: string[];
   components: string[];
   connected_modules: string[];
-  confidence: number;
+  confidence?: number;
   evidence?: string[];
 }
 
@@ -143,7 +154,7 @@ export interface AnalysisResult {
   localPath?: string;
   readme?: string;
   stack?: {
-    categories?: any;
+    categories?: Partial<TechStack>;
     flat?: TechStack;
   };
   folderStructure?: FileTreeNode[];
@@ -153,7 +164,7 @@ export interface AnalysisResult {
   executive_overview?: ExecutiveOverview;
   architecture?: ArchitectureAnalysis;
   architecture_summary?: string;
-  modules?: any[];
+  modules?: BusinessModule[];
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
   analysis_evidence?: Record<string, unknown>;

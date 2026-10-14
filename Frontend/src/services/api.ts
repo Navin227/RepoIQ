@@ -1,4 +1,12 @@
-import { AnalysisResult, TechStack, SimilarRepo } from '../types';
+import type {
+  AnalysisResult,
+  ArchitectureAnalysis,
+  BusinessModule,
+  ExecutiveOverview,
+  FileTreeNode,
+  SimilarRepo,
+  TechStack,
+} from '../types';
 import { buildSearchRequestUrl, resolveApiBase } from './api-base';
 
 class ApiNetworkError extends Error {
@@ -344,17 +352,17 @@ export interface AnalyzeRepositoryResponse {
   local_path?: string;
   readme?: string;
   stack?: {
-    categories?: any;
+    categories?: Partial<TechStack>;
     flat?: TechStack;
     languages?: string[];
   };
-  folder_structure?: any[];
+  folder_structure?: FileTreeNode[];
   languages?: string[];
   overview?: string;
-  executive_overview?: any;
-  architecture?: any;
+  executive_overview?: ExecutiveOverview;
+  architecture?: ArchitectureAnalysis;
   architecture_summary?: string;
-  modules?: any[];
+  modules?: BusinessModule[];
   analysis_evidence?: Record<string, unknown>;
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
@@ -479,20 +487,17 @@ export async function analyzeRepository(
         stack: result.stack,
         folderStructure: result.folder_structure,
         projectSummary: result.architecture_summary,
-        keyFeatures: [
-          'Technology stack detected',
-          'Repository structure analyzed',
-          ...(result.ai_insights || []),
-        ],
+        keyFeatures: result.ai_insights || [],
         overview: result.overview,
         executive_overview: result.executive_overview,
         architecture: result.architecture,
         architecture_summary: result.architecture_summary,
         modules: result.modules,
+        similar_repositories: result.similar_repositories,
         analysis_evidence: result.analysis_evidence,
         ai_insights: result.ai_insights,
         languages: result.languages,
-      } as any;
+      };
     }
 
     return {

@@ -190,7 +190,7 @@ class RepoScanner:
                 }
             # CI/CD
             elif (
-                path.parent.name == "workflows" and 
+                path.parent.name == "workflows" and
                 path.parent.parent.name == ".github"
             ):
                 dependencies[rel_path] = {
@@ -290,16 +290,26 @@ class RepoScanner:
         return previews
 
     def _find_readme(self, repo_path: Path) -> Path | None:
-        readme_candidates: list[tuple[int, int, Path]] = []
+        readme_candidates: list[tuple[int, int, int, Path]] = []
         for candidate in repo_path.rglob("*"):
             if not candidate.is_file() or not candidate.name.lower().startswith("readme."):
                 continue
             relative_parts = candidate.relative_to(repo_path).parts
-            docs_rank = 0 if "docs" in relative_parts or "documentation" in relative_parts else 1
-            readme_candidates.append((docs_rank, len(relative_parts), candidate))
+            if any(part.lower() in IGNORED_DIRS for part in relative_parts[:-1]):
+                continue
+            # Prefer the repository root README. Nested documentation is a fallback,
+            # not a replacement for the project's primary README.
+            root_rank = 0 if len(relative_parts) == 1 else 1
+            docs_rank = 0 if any(
+                part.lower() in {"docs", "documentation"} for part in relative_parts[:-1]
+            ) else 1
+            readme_candidates.append((root_rank, docs_rank, len(relative_parts), candidate))
         if not readme_candidates:
             return None
-        return sorted(readme_candidates, key=lambda item: (item[0], item[1]))[0][2]
+        return sorted(
+            readme_candidates,
+            key=lambda item: (item[0], item[1], item[2], item[3].as_posix().lower()),
+        )[0][3]
 
     def _top_level_dirs(self, repo_path: Path) -> list[str]:
         return [

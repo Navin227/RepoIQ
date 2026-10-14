@@ -43,12 +43,9 @@ def analyze_repository(
                 "description": description,
                 "topics": [],
             }
-            readme_content = None
-            for readme_name in ["README.md", "README.rst", "README.txt"]:
-                readme_path = repo_path / readme_name
-                if readme_path.exists():
-                    readme_content = readme_path.read_text()
-                    break
+            readme_path, readme_source = github_service.find_readme_path(repo_path)
+            readme_content = github_service.find_readme(repo_path) or ""
+            repository_metadata["readme_source"] = readme_source
         elif payload.repo_url:
             clone_result = github_service.clone_repository(payload.repo_url)
             repo_path = Path(clone_result["local_path"])
@@ -65,13 +62,22 @@ def analyze_repository(
                     "topics": [],
                     "readme_source": "local_path",
                 }
+
             readme_path, readme_source = github_service.find_readme_path(repo_path)
-            readme_content = github_service.find_readme(repo_path) or github_service.fetch_readme(payload.repo_url, repository_metadata.get("default_branch")) or ""
+            readme_content = github_service.find_readme(repo_path)
+            if readme_content:
+                readme_source = f"clone:{readme_source}"
+            else:
+                readme_content = github_service.fetch_readme(
+                    payload.repo_url,
+                    repository_metadata.get("default_branch"),
+                ) or ""
+                readme_source = "github_api" if readme_content else "not_found"
             repository_metadata["readme_source"] = readme_source
             logger.info(
                 "README selected for analysis repo=%s path=%s source=%s bytes=%s chars=%s",
                 repository_metadata.get("full_name") or repo_name,
-                str(readme_path) if readme_path else "missing",
+                str(readme_path) if readme_path else ("github_api" if readme_source == "github_api" else "missing"),
                 readme_source,
                 len(readme_content.encode("utf-8")) if readme_content else 0,
                 len(readme_content) if readme_content else 0,

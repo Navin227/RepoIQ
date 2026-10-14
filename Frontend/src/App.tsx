@@ -551,21 +551,7 @@ export default function App() {
           url:
             result.repoUrl ??
             repoUrl,
-          description:
-            (result as any).description ||
-            '',
-          stars:
-            (result as any).stars ||
-            0,
-          forks:
-            (result as any).forks ||
-            0,
-          language:
-            (result as any).language ||
-            '',
-          topics:
-            (result as any).topics ||
-            [],
+          description: '',
 
           localPath:
             result.localPath,
@@ -574,42 +560,15 @@ export default function App() {
             result.readme ?? '',
 
           overview: {
-            aiSummary:
-              (result as any).overview ||
-              'Repository analyzed successfully.',
+            aiSummary: result.overview || '',
+            executiveOverview: result.executive_overview,
 
-            executiveOverview:
-              (result as any)
-                .executive_overview,
-
-            info: {
-              license: 'MIT',
-              contributors: 1,
-              openIssues: 0,
-              lastCommit: 'Just now',
-            },
-
-            stats: {
-              linesOfCode: '1K',
-              filesCount: 10,
-              commitsCount: '1',
-              pullRequests: 0,
-            },
-
-            topics: [
-              'github',
-              'developer-tools',
-            ],
           },
 
           analysis: {
-            projectSummary:
-              (result as any)
-                .architecture_summary ||
-              'Architecture details will appear here.',
+            projectSummary: result.architecture_summary || '',
 
-            techStack:
-              (result.stack?.flat as any) || {
+            techStack: result.stack?.flat || {
                 frontend: [],
                 backend: [],
                 database: [],
@@ -617,21 +576,10 @@ export default function App() {
                 devops: [],
               },
 
-            keyFeatures: [
-              'Technology stack detected',
-              'Repository structure analyzed',
-              ...(
-                (result as any)
-                  .ai_insights || []
-              ),
-            ],
+            keyFeatures: result.ai_insights || [],
 
-            businessModules:
-              (
-                (result as any)
-                  .modules || []
-              ).map(
-                (module: any) => ({
+            businessModules: (result.modules || []).map(
+                module => ({
                   name: module.name,
 
                   purpose:
@@ -662,8 +610,7 @@ export default function App() {
                     [],
 
                   confidence:
-                    module.confidence ??
-                    60,
+                    module.confidence,
                 })
               ),
           },
@@ -672,85 +619,14 @@ export default function App() {
             result.folderStructure ??
             [],
 
-          similarRepos:
-            (
-              (result as any)
-                .similar_repositories ||
-              []
-            ).map(
-              (item: any) => ({
-                name: item.name,
-                owner: item.owner,
+          similarRepos: result.similar_repositories || [],
 
-                fullName:
-                  item.fullName ||
-                  item.full_name ||
-                  `${item.owner}/${item.name}`,
-
-                full_name:
-                  item.full_name,
-
-                url: item.url,
-
-                html_url:
-                  item.html_url ||
-                  item.url,
-
-                description:
-                  item.description ||
-                  '',
-
-                similarity:
-                  item.similarity ?? item.similarity_score ?? 0,
-
-                similarity_breakdown:
-                  item.similarity_breakdown || {},
-
-                stars:
-                  item.stars ?? item.stargazers_count ?? 0,
-
-                forks:
-                  item.forks ?? item.forks_count ?? 0,
-
-                language:
-                  item.language || 'Unknown',
-
-                topics:
-                  item.topics || [],
-
-                reason:
-                  item.reason ||
-                  '',
-
-                project_type:
-                  item.project_type,
-
-                architecture:
-                  item.architecture,
-
-                shared_technologies:
-                  item.shared_technologies ||
-                  [],
-
-                shared_modules:
-                  item.shared_modules ||
-                  [],
-
-                badges:
-                  item.badges || [],
-              })
-            ),
-
-          languages:
-            (result as any)
-              .languages || [],
+          languages: result.languages || [],
 
           rawStack:
             result.stack,
 
-          architecture:
-            (result as any)
-              .architecture,
+          architecture: result.architecture,
 
           analysisEvidence:
             result.analysis_evidence,
@@ -1575,16 +1451,16 @@ export default function App() {
               repo.description,
 
             stars:
-              repo.stars,
+              repo.stars ?? 0,
 
             forks:
-              repo.forks,
+              repo.forks ?? 0,
 
             language:
-              repo.language,
+              repo.language ?? '',
 
             topics:
-              repo.topics,
+              repo.topics ?? [],
           });
         }
       );
