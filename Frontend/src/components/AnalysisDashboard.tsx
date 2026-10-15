@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { RepositoryReadme } from './RepositoryReadme';
 import {
   Star, GitFork, BookMarked, Terminal, Code, Database, Globe,
   Settings, ChevronRight, Share2, ExternalLink, Sparkles,
@@ -277,7 +278,7 @@ const iconMap: Record<string, LucideIcon> = {
 
 export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackToSearch, onAnalyze, serverAvailable }: AnalysisDashboardProps) {
   const [viewMode, setViewMode] = useState<'overview' | 'modules' | 'analysis'>('overview');
-  const [activeTab, setActiveTab] = useState<'architecture' | 'technology' | 'structure'>('architecture');
+  const [activeTab, setActiveTab] = useState<'architecture' | 'technology' | 'structure' | 'readme'>('architecture');
   const [activeConnectIdx, setActiveConnectIdx] = useState<number | null>(null);
   const [selectedModuleIdx, setSelectedModuleIdx] = useState<number>(0);
   const [hoveredNodeIdx, setHoveredNodeIdx] = useState<number | null>(null);
@@ -404,7 +405,8 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
   const developerTabs = [
     { id: 'architecture', label: 'Architecture & Flow' },
     { id: 'technology', label: 'Technology Stack' },
-    { id: 'structure', label: 'Repository Structure' }
+    { id: 'structure', label: 'Repository Structure' },
+    { id: 'readme', label: 'README' }
   ] as const;
 
   return (
@@ -434,6 +436,9 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
               <ExternalLink className="h-3.5 w-3.5" />
               <span>GitHub Link</span>
             </a>
+            <span className={`inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium ${repo.analysisStatus === 'ai_generated' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
+              {repo.analysisStatus === 'ai_generated' ? 'Evidence analysis complete' : `Analysis ${repo.analysisStatus || 'status unavailable'}`}
+            </span>
           </div>
           <p className="text-sm text-gray-400 mt-2 max-w-2xl font-sans leading-relaxed">
             {getEvidenceText(repo.description)}
@@ -1374,6 +1379,10 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                 </div>
 
               </div>
+            )}
+
+            {activeTab === 'readme' && (
+              <RepositoryReadme repo={repo} />
             )}
 
             {/* SUB-TAB 2: TECHNOLOGY STACK */}

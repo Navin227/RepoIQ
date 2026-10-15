@@ -22,11 +22,15 @@ def init_db() -> None:
         with engine.begin() as connection:
             for column_name, column_type in {
                 "readme": "TEXT",
+                "readme_path": "TEXT",
                 "folder_structure": "JSON",
                 "languages": "JSON",
                 "architecture": "JSON",
                 "executive_overview": "JSON",
                 "analysis_evidence": "JSON",
+                "analysis_status": "TEXT",
+                "commit_sha": "TEXT",
+                "repository_model": "JSON",
             }.items():
                 connection.execute(
                     text(
@@ -39,11 +43,12 @@ def init_db() -> None:
             column["name"]
             for column in inspect(engine).get_columns("analysis_results")
         }
-        if "analysis_evidence" not in columns:
+        additions = {"analysis_evidence": "JSON", "analysis_status": "TEXT", "commit_sha": "TEXT", "repository_model": "JSON", "readme_path": "TEXT"}
+        if any(name not in columns for name in additions):
             with engine.begin() as connection:
-                connection.execute(
-                    text("ALTER TABLE analysis_results ADD COLUMN analysis_evidence JSON")
-                )
+                for name, kind in additions.items():
+                    if name not in columns:
+                        connection.execute(text(f"ALTER TABLE analysis_results ADD COLUMN {name} {kind}"))
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -8,20 +8,9 @@ from app.services.stack_detector import StackDetector
 from app.utils.repo_scanner import RepoScanner
 
 
-def test_llm_service_accepts_metadata_scan_and_stack():
+def test_legacy_summary_generator_is_not_part_of_stack_detection():
     service = LLMService(provider="mock")
-
-    response = service.generate_overview(
-        repo_name="acme/example",
-        description="Example repository",
-        readme="README",
-        technologies={"languages": ["Python"], "categories": {}},
-        repo_structure=[],
-        repo_stats={},
-    )
-
-    assert isinstance(response, str)
-    assert response
+    assert not hasattr(service, "generate_overview")
 
 
 def test_frontend_detection_is_categorized_and_aggregated():

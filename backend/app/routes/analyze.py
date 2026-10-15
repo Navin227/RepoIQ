@@ -1,6 +1,8 @@
 import inspect
 import json
 import logging
+import subprocess
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +22,7 @@ from app.services.semantic_profile_builder import build_semantic_repository_prof
 from app.services.similar_repo_service import SimilarRepoService
 from app.utils.repo_scanner import RepoScanner
 from app.utils.git_utils import normalize_github_url
+from app.services.repository_model import RepositoryRetrieval, build_repository_model
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -37,6 +40,7 @@ def analyze_repository(
             if not repo_path.exists() or not repo_path.is_dir():
                 raise HTTPException(status_code=400, detail="Local path does not exist or is not a directory")
             repo_name = repo_path.name
+            clone_result = {"commit_sha": ""}
             description = ""
             repository_metadata = {
                 "name": repo_name,
@@ -71,7 +75,7 @@ def analyze_repository(
             else:
                 readme_content = github_service.fetch_readme(
                     payload.repo_url,
-                    repository_metadata.get("default_branch"),
+                    clone_result.get("commit_sha"),
                 ) or ""
                 readme_source = "github_api" if readme_content else "not_found"
             repository_metadata["readme_source"] = readme_source
@@ -87,6 +91,20 @@ def analyze_repository(
             raise HTTPException(status_code=400, detail="Either repo_url or local_path is required")
 
         scan = RepoScanner().scan(repo_path)
+        commit_sha = str(clone_result.get("commit_sha") or "")
+        if not commit_sha:
+            try:
+                commit_sha = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            except (subprocess.CalledProcessError, OSError):
+                digest = hashlib.sha256()
+                for relative in RepositoryRetrieval(repo_path).inventory():
+                    digest.update(relative.encode("utf-8", errors="replace"))
+                    try:
+                        digest.update((repo_path / relative).read_bytes())
+                    except OSError:
+                        continue
+                commit_sha = "local-sha256:" + digest.hexdigest()
+        repository_metadata["commit_sha"] = commit_sha
         se_stats = (scan.get("source_evidence") or {}).get("stats", {})
         if se_stats:
             logger.info(
@@ -100,8 +118,7 @@ def analyze_repository(
                 ),
             )
         stack = StackDetector().detect(scan)
-        print("📊 DETECTED STACK (JSON):")
-        print(json.dumps(stack, indent=2, default=str))
+        logger.debug("Detected repository stack: %s", json.dumps(stack, ensure_ascii=False, default=str))
         folder_structure = RepositoryStructureService().build_tree(repo_path)
 
         llm_service = LLMService()
@@ -132,6 +149,38 @@ def analyze_repository(
                 repository_structure=[folder_structure] if folder_structure else [],
                 scan=scan,
             )
+        ai_analysis.setdefault("analysis_evidence", {})["commit_sha"] = commit_sha
+        analysis_status = ai_analysis.get("analysis_status", "degraded")
+        repository_model = build_repository_model(ai_analysis, RepositoryRetrieval(repo_path), commit_sha)
+        if analysis_status == "degraded":
+            repository_model.unresolved_questions = ["LLM analysis failed; repository claims remain unverified."]
+            repository_model.coverage["status"] = "degraded"
+        else:
+            unresolved = [claim.text for claim in repository_model.claims if claim.state != "confirmed"]
+            unresolved.extend(repository_model.evidence_issues)
+            unresolved.extend(str(item.get("question") or item.get("query") or item) if isinstance(item, dict) else str(item) for item in ai_analysis["analysis_evidence"].get("investigation_coverage", {}).get("unresolved", []))
+            unresolved.extend(f"Contradictory claims about {item['subject']}" for item in repository_model.contradictions)
+            repository_model.unresolved_questions = list(dict.fromkeys(unresolved))
+            if unresolved:
+                analysis_status = "partial"
+            repository_model.coverage["status"] = analysis_status
+            valid_modules = {claim.target_name.casefold() for claim in repository_model.claims if claim.category == "module" and claim.state in {"confirmed", "inferred"}}
+            ai_analysis["modules"] = [module for module in ai_analysis.get("modules", []) if module.get("name", "").casefold() in valid_modules]
+            valid_features = {claim.target_name.casefold() for claim in repository_model.claims if claim.category == "feature" and claim.state in {"confirmed", "inferred"}}
+            executive = ai_analysis.get("executive_overview") or {}
+            executive["user_features"] = [feature for feature in executive.get("user_features", []) if feature.get("name", "").casefold() in valid_features]
+            if not any(claim.category in {"overview", "executive_summary"} and claim.state in {"confirmed", "inferred"} for claim in repository_model.claims):
+                ai_analysis["overview"] = ""
+                executive["what_is_this_project"] = []
+                executive["why_was_it_built"] = "Unable to confidently determine from repository evidence."
+                executive["why_is_it_valuable"] = "Unable to confidently determine from repository evidence."
+                executive["one_line_summary"] = "Unable to confidently determine from repository evidence."
+            if not any(claim.category in {"architecture", "data_flow", "integration", "deployment"} and claim.state in {"confirmed", "inferred"} for claim in repository_model.claims):
+                ai_analysis["architecture"] = {"architecture_summary": "Unable to confidently determine from repository evidence.", "summary": "Unable to confidently determine from repository evidence.", "architecture_type": "unknown", "flow": [], "request_lifecycle": [], "components": [], "communication": [], "deployment": "unknown"}
+            kept = {name.casefold() for name in valid_modules}
+            repository_model.components = [component for component in repository_model.components if component.name.casefold() in kept]
+            repository_model.relationships = [relation for relation in repository_model.relationships if relation.source.casefold() in kept and relation.target.casefold() in kept]
+        ai_analysis["analysis_status"] = analysis_status
         semantic_repository_profile = build_semantic_repository_profile(
             repository_metadata,
             readme_content or "",
@@ -158,6 +207,8 @@ def analyze_repository(
         except Exception as exc:
             logger.exception("Similar repository analysis failed: %s", exc)
             similar_repositories = []
+
+        ai_insights = [item.get("name", "") for item in (ai_analysis.get("executive_overview") or {}).get("user_features", []) if item.get("name")]
 
         repository = None
         if payload.repo_url:
@@ -190,18 +241,17 @@ def analyze_repository(
             result.architecture_summary = llm_service.architecture_summary_text(ai_analysis)
             result.similar_repositories = similar_repositories
             result.readme = readme_content
+            result.readme_path = readme_path.relative_to(repo_path).as_posix() if readme_path else None
             result.folder_structure = [folder_structure] if folder_structure else []
             result.languages = stack.get("languages", [])
             result.architecture = ai_analysis.get("architecture")
             result.executive_overview = ai_analysis.get("executive_overview")
             result.analysis_evidence = ai_analysis.get("analysis_evidence")
+            result.analysis_status = analysis_status
+            result.commit_sha = commit_sha
+            result.repository_model = repository_model.model_dump(mode="json")
             db.commit()
             db.refresh(repository)
-
-        ai_insights = ai_analysis.get("ai_insights") or llm_service.generate_ai_insights(ai_analysis)
-        analysis_status = ai_analysis.get("analysis_status") or (
-            "fallback" if not ai_analysis.get("overview") else "ai_generated"
-        )
 
         return AnalyzeResponse(
             status="success",
@@ -210,10 +260,11 @@ def analyze_repository(
             repo_url=payload.repo_url,
             local_path=str(repo_path) if payload.local_path else None,
             readme=readme_content,
+            readme_path=readme_path.relative_to(repo_path).as_posix() if readme_path else None,
             stack=stack,
             folder_structure=[folder_structure],
             languages=stack.get("languages", []),
-            overview=ai_analysis["overview"],
+            overview=ai_analysis.get("overview", ""),
             executive_overview=ai_analysis.get("executive_overview"),
             architecture=ai_analysis.get("architecture"),
             architecture_summary=llm_service.architecture_summary_text(ai_analysis),
@@ -221,6 +272,8 @@ def analyze_repository(
             analysis_evidence=ai_analysis.get("analysis_evidence"),
             ai_insights=ai_insights,
             analysis_status=analysis_status,
+            commit_sha=commit_sha,
+            repository_model=repository_model.model_dump(mode="json"),
             similar_repositories=similar_repositories,
         )
     except ValueError as e:

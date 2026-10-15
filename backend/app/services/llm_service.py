@@ -11,6 +11,7 @@ from app.services.repomix_service import RepomixContextService
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.source_evidence_extractor import redact_secrets
+from app.services.repository_model import RepositoryRetrieval
 
 logger = logging.getLogger(__name__)
 MAX_GEMINI_INPUT_TOKENS = 100_000
@@ -51,28 +52,72 @@ class LLMService:
                 self.provider,
                 json.dumps(payload, ensure_ascii=False, indent=2),
             )
-            response_text = self._generate_with_gemini(payload)
-            self._log_gemini_output(analysis_id, self.provider, response_text)
-            generated = self._parse_json_response(response_text)
+            generated = None
+            retrieval = RepositoryRetrieval(repo_path) if repo_path else None
+            for round_number in range(3):
+                response_text = self._generate_with_gemini(payload)
+                self._log_gemini_output(analysis_id, self.provider, response_text)
+                generated = self._parse_json_response(response_text)
+                requests = generated.get("investigation_requests", []) if isinstance(generated, dict) else []
+                if not requests:
+                    if payload.get("investigation_coverage"):
+                        payload["investigation_coverage"] = {
+                            "rounds": round_number + 1,
+                            "unresolved": [],
+                            "additional_matches": len(payload.get("on_demand_source_matches", [])),
+                        }
+                    break
+                if not retrieval or round_number == 2:
+                    payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": len(payload.get("on_demand_source_matches", []))}
+                    break
+                retrieved = []
+                for request in requests[:12]:
+                    if not isinstance(request, dict):
+                        continue
+                    query = str(request.get("query") or "").strip()
+                    if query:
+                        retrieved.extend(retrieval.search(query))
+                if not retrieved:
+                    payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": 0}
+                    break
+                for item in retrieved:
+                    item["commit_sha"] = str(metadata.get("commit_sha") or "")
+                payload.setdefault("on_demand_source_matches", []).extend(retrieved)
+                payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": len(payload["on_demand_source_matches"])}
+            if generated is None:
+                raise ValueError("Gemini returned no analysis")
             analysis = self._normalize_analysis(generated, payload)
             analysis["analysis_evidence"] = payload["analysis_evidence"]
-            analysis["ai_insights"] = self.generate_ai_insights(analysis)
-            analysis["analysis_status"] = "ai_generated"
-            self._log_analysis_sections(analysis, fallback=False)
+            if payload.get("on_demand_source_matches"):
+                analysis["analysis_evidence"]["on_demand_source_matches"] = payload["on_demand_source_matches"]
+            analysis["ai_insights"] = []
+            coverage = payload.get("investigation_coverage") or {}
+            if coverage:
+                payload["analysis_evidence"]["investigation_coverage"] = coverage
+            analysis["analysis_status"] = "partial" if coverage.get("unresolved") else "ai_generated"
+            self._log_analysis_sections(analysis, degraded=False)
             logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=success", analysis_id)
             return analysis
         except Exception as exc:
             logger.warning(
-                "Analysis fallback activated: reason=%s analysis_id=%s",
-                self._fallback_reason(exc),
+                "Analysis degraded: reason=%s analysis_id=%s",
+                self._failure_reason(exc),
                 analysis_id,
             )
-            analysis = self._fallback_analysis(payload)
-            analysis["analysis_evidence"] = payload["analysis_evidence"]
-            analysis["ai_insights"] = self.generate_ai_insights(analysis)
-            analysis["analysis_status"] = "fallback"
-            self._log_analysis_sections(analysis, fallback=True)
-            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=fallback", analysis_id)
+            # Provider failure is a degraded result. Never turn metadata or filenames
+            # into a fabricated successful architecture.
+            analysis = {
+                "overview": "",
+                "executive_overview": None,
+                "modules": [],
+                "architecture": {"architecture_summary": "", "summary": "", "architecture_type": "unknown", "flow": [], "request_lifecycle": [], "components": [], "communication": [], "deployment": "unknown"},
+                "analysis_evidence": payload["analysis_evidence"],
+                "ai_insights": [],
+                "analysis_status": "degraded",
+                "analysis_error": self._failure_reason(exc),
+            }
+            analysis["analysis_evidence"]["investigation_coverage"] = {"status": "degraded", "unresolved": ["LLM analysis failed."]}
+            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=degraded", analysis_id)
             return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
@@ -111,6 +156,14 @@ Use exactly these top-level fields:
     "why_is_it_valuable": "Practical value supported by evidence.",
     "one_line_summary": "One-sentence summary."
   },
+  "claims": [{
+    "text": "One significant repository finding",
+    "subject": "stable subject for contradiction checks",
+    "category": "overview|feature|module|architecture|deployment|integration|data_flow",
+    "target_name": "matching feature/module name when applicable",
+    "confidence": 0.0,
+    "evidence": [{"path": "exact/repository/path", "start_line": 1, "end_line": 2, "excerpt": "Exact source text from these lines"}]
+  }],
   "modules": [{
     "name": "Functional capability",
     "purpose": "Concise responsibility.",
@@ -135,7 +188,8 @@ Use exactly these top-level fields:
     }],
     "communication": ["Supported communication method"],
     "deployment": "Deployment evidence or the unknown value"
-  }
+  },
+  "investigation_requests": [{"query": "symbol or identifier to search", "question": "what remains unresolved"}]
 }
 
 Rules:
@@ -162,7 +216,7 @@ Rules:
   or layers such as backend, frontend, services, controllers or utils.
 - Prefer distinct capabilities when supported by routes, source symbols and
   implementation evidence. Return fewer modules when evidence is weak.
-- Return up to 10 modules. Each module must reference exact file paths or
+- Return at most 6 modules. Each module must reference exact file paths or
   API routes from the supplied inventory.
 - Do not accept a filename merely because its basename resembles a real file.
 - Explain architecture from observed routes, source, services, stack and
@@ -171,6 +225,9 @@ Rules:
   than repeating the executive overview.
 - Flow must be ordered. Component cards should describe actual responsibilities.
 - Communication and deployment must be supported by repository evidence.
+- Return a claim record for every significant summary, capability, module, architecture, deployment, integration, or data-flow statement. Cite exact source paths, exact line ranges, and exact excerpts. Do not cite a file without a relevant range. If evidence is missing, omit the claim and leave investigation_requests.
+- Keep the complete JSON concise. Return at most 6 user features and 16 claims. Keep each evidence excerpt under 240 characters. Do not repeat the same fact in multiple claims.
+- When required source evidence is missing, return up to 12 focused investigation_requests. Search exact symbols, identifiers, imports or configuration keys. Leave the list empty when findings are supported.
 """
         prompt = (
             instructions
@@ -181,7 +238,7 @@ Rules:
         genai.configure(api_key=settings.gemini_api_key)
         generation_config = genai.types.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=8192,
+            max_output_tokens=16_384,
             response_mime_type="application/json",
         )
 
@@ -303,6 +360,12 @@ Rules:
                 )
 
                 response_text = getattr(response, "text", "") or ""
+                finish_reason = None
+                try:
+                    finish_reason = response.candidates[0].finish_reason
+                except (AttributeError, IndexError, TypeError):
+                    pass
+                logger.info("Gemini response metadata: model=%s finish_reason=%s response_chars=%s", model_name, finish_reason, len(response_text))
                 if not response_text.strip():
                     raise RuntimeError("Gemini returned an empty response")
                 return response_text
@@ -380,7 +443,7 @@ Rules:
         logger.info("GEMINI_OUTPUT_END analysis_id=%s", analysis_id)
 
     @staticmethod
-    def _fallback_reason(exc: Exception) -> str:
+    def _failure_reason(exc: Exception) -> str:
         message = str(exc).lower()
         if "not configured" in message:
             return "gemini_credentials_not_configured"
@@ -394,14 +457,14 @@ Rules:
 
     @staticmethod
     def _log_analysis_sections(
-        analysis: Dict[str, Any], fallback: bool
+        analysis: Dict[str, Any], degraded: bool
     ) -> None:
         executive = analysis.get("executive_overview")
         architecture = analysis.get("architecture")
         logger.info(
-            "Analysis sections complete: fallback=%s overview=%s "
+            "Analysis sections complete: degraded=%s overview=%s "
             "executive_features=%s modules=%s architecture_components=%s",
-            fallback,
+            degraded,
             bool(analysis.get("overview")),
             len(executive.get("user_features", []))
             if isinstance(executive, dict)
@@ -461,11 +524,13 @@ Rules:
                 "topics": metadata.get("topics", []),
                 "readme_source": metadata.get("readme_source") or "repository_scan",
             },
-            "readme_text": readme_text[:12_000],
-            "readme_summary": self._summarize_readme(readme_text),
+            "readme_text": readme_text,
             "detected_technology_stack": stack,
             "repository_structure": self._trim_structure(repository_structure),
+            # The complete inventory stays in RepositoryRetrieval. A bounded
+            # preview is enough for prompt orientation; all paths remain searchable.
             "file_tree": scan.get("files", [])[:500],
+            "inventory_file_count": len(scan.get("files", [])),
             "code_signals": code_signals,
             "api_routes": code_signals.get("api_routes", []),
             "api_routes_enriched": code_signals.get("api_routes_enriched", []),
@@ -523,13 +588,9 @@ Rules:
         if not isinstance(raw, dict):
             raw = {}
         payload = dict(raw)
-        payload["selected_source_file_details"] = (
-            details[:45] if isinstance(details, list) else []
-        )
+        payload["selected_source_file_details"] = details if isinstance(details, list) else []
         return payload
 
-    def _summarize_readme(self, readme: str) -> str:
-        return " ".join((readme or "").split())[:8000]
 
     def _trim_structure(
         self, structure: List[Dict[str, Any]]
@@ -757,6 +818,10 @@ Rules:
                     evidence_paths.append(detail["path"])
 
         raw_paths = list(payload.get("file_tree", [])) + evidence_paths
+        raw_paths += [
+            item.get("path") for item in payload.get("on_demand_source_matches", [])
+            if isinstance(item, dict) and item.get("path")
+        ]
         known_paths = {
             normalized
             for normalized in (
@@ -870,7 +935,38 @@ Rules:
             "executive_overview": executive,
             "modules": normalized_modules[:10],
             "architecture": normalized_architecture,
+            "claims": self._normalize_claims(analysis.get("claims")),
         }
+
+    @staticmethod
+    def _normalize_claims(value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        claims = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+                continue
+            text = str(item["text"]).strip()
+            key = re.sub(r"\W+", " ", text.casefold()).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence = []
+            for ref in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
+                if not isinstance(ref, dict):
+                    continue
+                path = str(ref.get("path") or "").strip()
+                start = ref.get("start_line")
+                end = ref.get("end_line")
+                if path and isinstance(start, int) and isinstance(end, int) and start >= 1 and end >= start:
+                    evidence.append({"path": path, "start_line": start, "end_line": end, "excerpt": str(ref.get("excerpt") or "")})
+            try:
+                confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            claims.append({"text": text, "subject": str(item.get("subject") or ""), "category": str(item.get("category") or "claim"), "target_name": str(item.get("target_name") or ""), "confidence": confidence, "evidence": evidence})
+        return claims
 
     def _normalize_architecture(
         self, architecture: Dict[str, Any], payload: Dict[str, Any] | None = None
@@ -1020,9 +1116,11 @@ Rules:
         self, data: Any, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         if not isinstance(data, dict):
-            return self._fallback_executive_overview(
-                payload, self._fallback_modules(payload)
-            )
+            return {
+                "what_is_this_project": [], "why_was_it_built": UNKNOWN,
+                "user_features": [], "typical_use_cases": [], "who_is_this_for": [],
+                "why_is_it_valuable": UNKNOWN, "one_line_summary": UNKNOWN,
+            }
 
         paragraphs = data.get("what_is_this_project", [])
         if isinstance(paragraphs, str):
@@ -1036,6 +1134,7 @@ Rules:
 
         feature_paths = self._feature_evidence_paths(payload)
         features = []
+        seen_feature_names: set[str] = set()
         raw_features = data.get("user_features", [])
         if isinstance(raw_features, list):
             for item in raw_features:
@@ -1063,7 +1162,9 @@ Rules:
                     and not self._matches_repository_directory(name, payload)
                     and name.strip().lower() not in {"storage", "database", "platform"}
                     and supported_evidence
+                    and name.casefold() not in seen_feature_names
                 ):
+                    seen_feature_names.add(name.casefold())
                     features.append({
                         "name": name,
                         "description": description,
@@ -1105,14 +1206,6 @@ Rules:
             ).strip(),
         }
 
-        fallback = self._fallback_executive_overview(
-            payload, self._fallback_modules(payload)
-        )
-        if not normalized["user_features"]:
-            normalized["user_features"] = fallback["user_features"]
-        for key, value in fallback.items():
-            if not normalized.get(key):
-                normalized[key] = value
         return normalized
 
     def _feature_evidence_paths(self, payload: Dict[str, Any]) -> set[str]:
@@ -1169,202 +1262,9 @@ Rules:
                 )
         return evidence_paths
 
-    def _fallback_analysis(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        metadata = payload.get("metadata") or {}
-        stack = payload.get("detected_technology_stack") or {}
-        categories = stack.get("categories", {}) if isinstance(stack, dict) else {}
-        tech_names = self._category_names(categories)
-        modules = self._fallback_modules(payload)
 
-        project_name = (
-            metadata.get("full_name") or metadata.get("name") or "This repository"
-        )
-        description = str(metadata.get("description") or "").strip()
-        readme_summary = self._readme_product_summary(payload)
-        project_summary = readme_summary or description
-        evidence = payload.get("analysis_evidence", {})
-        source_count = (
-            evidence.get("source_file_count", 0)
-            if isinstance(evidence, dict)
-            else 0
-        )
-        detections = (
-            evidence.get("technology_detections", [])
-            if isinstance(evidence, dict)
-            else []
-        )
 
-        if project_summary:
-            overview = (
-                f"{project_name}: {project_summary}"
-            )
-        else:
-            overview = (
-                f"The available repository evidence is insufficient to determine "
-                f"the user-facing purpose of {project_name}. Analysis found "
-                f"{source_count} source files and {len(detections)} concrete "
-                "technology detections."
-            )
 
-        flow = self._fallback_flow(tech_names, payload)
-        architecture_type = self._infer_architecture_type(tech_names, payload)
-        architecture_summary = self._build_architecture_summary(tech_names, payload)
-        lifecycle = self._build_request_lifecycle(tech_names, payload)
-        sync_path, async_path = self._build_sync_async_paths(tech_names, flow)
-
-        component_cards = []
-        for index, step in enumerate(flow):
-            component_cards.append(
-                {
-                    "name": step,
-                    "responsibility": self._fallback_component_responsibility(step),
-                    "input": self._fallback_component_input(step, tech_names),
-                    "output": self._fallback_component_output(step, tech_names),
-                    "communicates_with": self._fallback_component_communications(
-                        step, flow
-                    ),
-                    "connected_to": [flow[index + 1]]
-                    if index + 1 < len(flow)
-                    else [],
-                }
-            )
-
-        return {
-            "overview": overview,
-            "executive_overview": self._fallback_executive_overview(
-                payload, modules
-            ),
-            "modules": modules,
-            "architecture": {
-                "architecture_summary": architecture_summary,
-                "summary": architecture_summary,
-                "architecture_type": architecture_type,
-                "flow": flow,
-                "request_lifecycle": lifecycle,
-                "sync_path": sync_path,
-                "async_path": async_path,
-                "components": component_cards,
-                "communication": self._fallback_communication(
-                    tech_names, payload
-                ),
-                "deployment": self._fallback_deployment(tech_names, payload),
-            },
-            "analysis_evidence": payload.get("analysis_evidence", {}),
-        }
-
-    def _fallback_executive_overview(
-        self, payload: Dict[str, Any], modules: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        metadata = payload.get("metadata") or {}
-        project_name = (
-            metadata.get("full_name") or metadata.get("name") or "This project"
-        )
-        description = str(metadata.get("description") or "").strip()
-        readme_summary = self._readme_product_summary(payload)
-        evidence = payload.get("analysis_evidence", {})
-        source_count = (
-            evidence.get("source_file_count", 0)
-            if isinstance(evidence, dict)
-            else 0
-        )
-
-        summary = (
-            readme_summary
-            if readme_summary
-            else f"{project_name} is described as {description}."
-            if description
-            else f"Available repository evidence is insufficient to determine "
-                 f"what {project_name} is intended to do."
-        )
-        paragraphs = [summary]
-
-        features = self._readme_features(payload)
-        if not features:
-            features = [
-                {
-                    "name": item["name"],
-                    "description": item["description"],
-                    "evidence": item["evidence"],
-                }
-                for item in modules
-                if item.get("name") and item.get("description") and item.get("evidence")
-            ]
-        features = features[:8]
-
-        return {
-            "what_is_this_project": paragraphs,
-            "why_was_it_built": (
-                "Repository evidence does not establish why this project was built."
-            ),
-            "user_features": features,
-            "typical_use_cases": [],
-            "who_is_this_for": [],
-            "why_is_it_valuable": (
-                "Repository evidence does not establish the project's practical "
-                "value to users."
-            ),
-            "one_line_summary": (
-                f"{project_name}: {readme_summary or description}"
-                if readme_summary or description
-                else f"{project_name}: user-facing purpose is not clear from "
-                     "the available repository evidence."
-            ),
-        }
-
-    @staticmethod
-    def _clean_readme_text(line: str) -> str:
-        text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
-        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-        text = re.sub(r"<[^>]+>", "", text)
-        text = text.replace("`", "").replace("**", "").replace("__", "")
-        return " ".join(text.split()).strip(" -*#>|")
-
-    def _readme_product_summary(self, payload: Dict[str, Any]) -> str:
-        readme = str(payload.get("readme_text") or "")
-        if not readme.strip():
-            return ""
-
-        blocks: list[str] = []
-        current: list[str] = []
-        in_code_block = False
-        for raw_line in readme.splitlines():
-            line = raw_line.strip()
-            if line.startswith("```") or line.startswith("~~~"):
-                in_code_block = not in_code_block
-                continue
-            if in_code_block:
-                continue
-            if not line:
-                if current:
-                    blocks.append(" ".join(current))
-                    current = []
-                continue
-            if line.startswith("#"):
-                if current:
-                    blocks.append(" ".join(current))
-                    current = []
-                continue
-            if re.match(r"^(?:[-*_]\s*){3,}$", line) or "shields.io" in line.lower():
-                continue
-            cleaned = self._clean_readme_text(line)
-            if cleaned and not cleaned.startswith(("http://", "https://")):
-                current.append(cleaned)
-        if current:
-            blocks.append(" ".join(current))
-
-        for block in blocks:
-            if len(block) < 35:
-                continue
-            if re.search(
-                r"\b(install|installation|contribut|license|prerequisite|"
-                r"quick start|getting started|development setup)\b",
-                block[:100].lower(),
-            ):
-                continue
-            sentences = re.split(r"(?<=[.!?])\s+", block)
-            summary = " ".join(sentences[:3]).strip()
-            return summary[:900].rstrip()
-        return ""
 
     def _readme_evidence_path(self, payload: Dict[str, Any]) -> str:
         readme_paths = [
@@ -1382,732 +1282,25 @@ Rules:
             return selected.replace("\\", "/")
         return "README.md" if str(payload.get("readme_text") or "").strip() else ""
 
-    def _readme_features(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        readme = str(payload.get("readme_text") or "")
-        if not readme.strip():
-            return []
 
-        in_feature_section = False
-        features = []
-        for raw_line in readme.splitlines():
-            line = raw_line.strip()
-            if line.startswith("#"):
-                heading = self._clean_readme_text(line.lstrip("#")).lower()
-                in_feature_section = bool(
-                    re.search(r"\b(features?|capabilities|what you can do|"
-                              r"key functionality|highlights)\b", heading)
-                )
-                continue
-            if not in_feature_section or not re.match(r"^(?:[-*+]|\d+[.)])\s+", line):
-                continue
-            text = self._clean_readme_text(re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line))
-            if len(text) < 16:
-                continue
-            name_match = re.match(r"^([^:—–-]{3,48})\s*[:—–-]\s*(.+)$", text)
-            if name_match:
-                name, description = name_match.groups()
-            else:
-                name = " ".join(text.split()[:5]).rstrip(".,;:")
-                description = text
-            if self._is_generic_module_name(name):
-                continue
-            features.append({
-                "name": name,
-                "description": description[:280],
-                "evidence": [self._readme_evidence_path(payload)],
-            })
-            if len(features) == 8:
-                break
-        return features
 
-    @staticmethod
-    def _category_names(categories: Dict[str, Any]) -> Dict[str, List[str]]:
-        names = {}
-        for category, items in categories.items():
-            values = []
-            for item in items or []:
-                if isinstance(item, dict) and item.get("name"):
-                    values.append(str(item["name"]))
-                elif isinstance(item, str):
-                    values.append(item)
-            names[category] = values
-        return names
 
-    @staticmethod
-    def _has_tech(tech_names: Dict[str, List[str]], search: str) -> bool:
-        return any(
-            search.lower() in item.lower()
-            for items in tech_names.values()
-            for item in items
-        )
 
-    def _find_frontend_component(
-        self, tech_names: Dict[str, List[str]]
-    ) -> str | None:
-        frontend = [
-            item for item in tech_names.get("frontend", [])
-            if isinstance(item, str)
-        ]
-        if any("next" in item.lower() for item in frontend):
-            return "Next.js Frontend"
-        if any("react" in item.lower() for item in frontend):
-            return (
-                "React + Vite Frontend"
-                if self._has_tech(tech_names, "vite")
-                else "React Frontend"
-            )
-        if any("vue" in item.lower() for item in frontend):
-            return "Vue Frontend"
-        if any("svelte" in item.lower() for item in frontend):
-            return "Svelte Frontend"
-        if any("angular" in item.lower() for item in frontend):
-            return "Angular Frontend"
-        return None
 
-    def _find_backend_component(
-        self, tech_names: Dict[str, List[str]]
-    ) -> str | None:
-        backend = [
-            item for item in tech_names.get("backend", [])
-            if isinstance(item, str)
-        ]
-        for needle, label in (
-            ("fastapi", "FastAPI Service"),
-            ("express", "Express API"),
-            ("nest", "NestJS Service"),
-            ("flask", "Flask Service"),
-            ("django", "Django Application"),
-            ("spring", "Spring Boot Service"),
-            ("gin", "Gin Service"),
-            ("go", "Go Backend Service"),
-        ):
-            if any(needle in item.lower() for item in backend):
-                return label
-        return None
 
-    def _infer_deployment_type(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> str:
-        if self._has_tech(tech_names, "lambda") or self._has_tech(
-            tech_names, "serverless"
-        ):
-            return "Serverless"
-        if self._has_tech(tech_names, "eks") or self._has_tech(
-            tech_names, "kubernetes"
-        ):
-            return "Kubernetes"
-        if self._has_tech(tech_names, "ecs"):
-            return "ECS"
-        if self._has_tech(tech_names, "docker"):
-            return "Docker Container"
-        if self._has_tech(tech_names, "terraform") or (
-            payload.get("code_signals", {}).get("infrastructure_files")
-        ):
-            return "Terraform"
-        if any(
-            self._has_tech(tech_names, cloud)
-            for cloud in ("aws", "gcp", "azure")
-        ):
-            return "Cloud Native"
-        return UNKNOWN
 
-    def _infer_architecture_type(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> str:
-        if self._has_tech(tech_names, "lambda") or self._has_tech(
-            tech_names, "serverless"
-        ):
-            return "Serverless"
-        if any(
-            self._has_tech(tech_names, key)
-            for key in ("eks", "kubernetes", "ecs")
-        ):
-            if self._has_tech(tech_names, "sqs") or self._has_tech(
-                tech_names, "sns"
-            ):
-                return "Event-driven"
-            return "Microservice"
-        if self._has_tech(tech_names, "sqs") or self._has_tech(
-            tech_names, "sns"
-        ):
-            return "Event-driven"
 
-        frontend = bool(tech_names.get("frontend"))
-        backend = bool(tech_names.get("backend"))
-        database = bool(tech_names.get("database"))
-        top_level = [
-            str(name).lower() for name in payload.get("top_level_modules", [])
-        ]
 
-        if (frontend and backend) or (backend and database):
-            return "Layered"
-        if backend:
-            return "Monolith"
-        if "frontend" in top_level and "backend" in top_level:
-            return "Layered"
-        if "api" in top_level and database:
-            return "Layered"
-        return UNKNOWN
 
-    def _build_architecture_summary(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> str:
-        parts = []
-        frontend = self._find_frontend_component(tech_names)
-        backend = self._find_backend_component(tech_names)
-        deployment = self._infer_deployment_type(tech_names, payload)
 
-        if frontend:
-            parts.append(
-                f"The repository includes a {frontend} as the user-facing "
-                "application layer."
-            )
-        elif any(
-            str(name).lower() == "frontend"
-            for name in payload.get("top_level_modules", [])
-        ):
-            parts.append(
-                "The repository includes a frontend application layer based "
-                "on the top-level project structure."
-            )
 
-        if backend:
-            parts.append(
-                f"Backend logic runs in a {backend} that handles incoming "
-                "application requests."
-            )
-        elif any(
-            self._has_tech(tech_names, key)
-            for key in ("fastapi", "express", "flask", "django")
-        ):
-            parts.append(
-                "Backend application code exposes HTTP APIs for request processing."
-            )
 
-        if self._has_tech(tech_names, "api gateway"):
-            parts.append(
-                "Requests are routed through an API Gateway layer before "
-                "reaching service logic."
-            )
-        if self._has_tech(tech_names, "lambda"):
-            parts.append(
-                "AWS Lambda functions host the serverless compute portion "
-                "of the application."
-            )
-        if self._has_tech(tech_names, "sqs") or self._has_tech(
-            tech_names, "sns"
-        ):
-            parts.append(
-                "Asynchronous queue and pub/sub patterns connect services "
-                "and background processing."
-            )
 
-        storage_options = (
-            ("dynamodb", "DynamoDB provides the managed persistence layer."),
-            ("s3", "S3 is used for object storage."),
-            ("postgresql", "PostgreSQL provides relational storage."),
-            ("mysql", "MySQL provides relational storage."),
-            ("mongodb", "MongoDB provides document storage."),
-        )
-        for needle, description in storage_options:
-            if self._has_tech(tech_names, needle):
-                parts.append(description)
-                break
 
-        if deployment != UNKNOWN:
-            parts.append(
-                f"Deployment is inferred as {deployment} based on repository "
-                "infrastructure evidence."
-            )
-        return " ".join(parts) if parts else UNKNOWN
 
-    def _build_request_lifecycle(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> List[str]:
-        lifecycle = []
-        top_level = [
-            str(name).lower() for name in payload.get("top_level_modules", [])
-        ]
-        frontend = self._find_frontend_component(tech_names)
-        backend = self._find_backend_component(tech_names)
 
-        if frontend:
-            lifecycle.append(
-                f"The user interacts with the {frontend} to start the workflow."
-            )
-        elif "frontend" in top_level:
-            lifecycle.append(
-                "The user interacts with the frontend application to start "
-                "the workflow."
-            )
 
-        if self._has_tech(tech_names, "api gateway"):
-            lifecycle.append(
-                "The request passes through API Gateway before reaching "
-                "application services."
-            )
-        elif backend:
-            lifecycle.append(f"The request reaches the {backend} over HTTP.")
-        elif any(
-            self._has_tech(tech_names, key)
-            for key in ("fastapi", "express", "flask", "django")
-        ):
-            lifecycle.append(
-                "The request reaches an HTTP API endpoint implemented by "
-                "repository backend code."
-            )
 
-        if self._has_tech(tech_names, "lambda"):
-            lifecycle.append(
-                "AWS Lambda executes the detected serverless business logic."
-            )
-        if self._has_tech(tech_names, "sqs"):
-            lifecycle.append(
-                "A job message is published to SQS for background processing."
-            )
-        if self._has_tech(tech_names, "sns"):
-            lifecycle.append(
-                "An SNS notification is broadcast to downstream services."
-            )
-
-        for needle, statement in (
-            ("dynamodb", "The application reads from or writes to DynamoDB."),
-            ("s3", "The workflow stores or retrieves objects from S3."),
-            ("postgresql", "The workflow reads from or writes to PostgreSQL."),
-            ("mysql", "The workflow reads from or writes to MySQL."),
-            ("mongodb", "The workflow reads from or writes to MongoDB."),
-        ):
-            if self._has_tech(tech_names, needle):
-                lifecycle.append(statement)
-                break
-
-        if not lifecycle:
-            return [UNKNOWN]
-
-        if "response" not in lifecycle[-1].lower():
-            lifecycle.append(
-                "The final response is returned to the caller after the "
-                "detected processing completes."
-            )
-        return lifecycle
-
-    def _fallback_modules(
-        self, payload: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        evidence = payload.get("analysis_evidence", {})
-        paths = evidence.get("business_file_names", []) if isinstance(
-            evidence, dict
-        ) else []
-        if not isinstance(paths, list):
-            return []
-
-        rules = [
-            (
-                "Authentication",
-                re.compile(r"(auth|login|identity|session)", re.I),
-                "Implements authentication-related behavior evidenced by repository source paths.",
-            ),
-            (
-                "File Upload",
-                re.compile(r"(upload|multipart)", re.I),
-                "Implements file upload behavior evidenced by repository source paths.",
-            ),
-            (
-                "File Management",
-                re.compile(r"(file|document|drive)", re.I),
-                "Implements file or document management behavior evidenced by repository source paths.",
-            ),
-            (
-                "File Storage",
-                re.compile(r"(storage|bucket|s3)", re.I),
-                "Implements storage-related behavior evidenced by repository source paths.",
-            ),
-            (
-                "Commerce",
-                re.compile(r"(payment|checkout|cart|product|order)", re.I),
-                "Implements commerce behavior evidenced by repository source paths.",
-            ),
-            (
-                "Messaging",
-                re.compile(r"(chat|message|notification)", re.I),
-                "Implements messaging behavior evidenced by repository source paths.",
-            ),
-            (
-                "Background Processing",
-                re.compile(r"(worker|queue|job)", re.I),
-                "Implements background processing evidenced by repository source paths.",
-            ),
-        ]
-
-        candidates = []
-        for name, pattern, purpose in rules:
-            matches = list(
-                dict.fromkeys(
-                    str(path) for path in paths if pattern.search(str(path))
-                )
-            )[:8]
-            if not matches:
-                continue
-            candidates.append(
-                {
-                    "name": name,
-                    "purpose": purpose,
-                    "description": purpose,
-                    "capabilities": [],
-                    "components": matches,
-                    "evidence": matches,
-                    "connected_modules": [],
-                    "confidence": 70,
-                }
-            )
-        return candidates[:10]
-
-    def _fallback_capabilities_for_module(self, name: str) -> List[str]:
-        lowered = name.lower()
-        if "auth" in lowered:
-            return [
-                "Manage user identity",
-                "Support protected access",
-                "Connect sign-in state to the application",
-            ]
-        if "upload" in lowered or "storage" in lowered:
-            return [
-                "Store user data",
-                "Track saved content",
-                "Connect stored data to application workflows",
-            ]
-        if "worker" in lowered or "processing" in lowered:
-            return [
-                "Handle background tasks",
-                "Process queued work",
-                "Separate long-running work from user actions",
-            ]
-        if "infrastructure" in lowered:
-            return [
-                "Define deployment resources",
-                "Organize environment setup",
-                "Support repeatable operations",
-            ]
-        return [
-            "Provide a major project responsibility",
-            "Coordinate related application behavior",
-            "Support the user workflow",
-        ]
-
-    def _fallback_components_for_module(
-        self, name: str, payload: Dict[str, Any]
-    ) -> List[str]:
-        files = payload.get("file_tree", [])
-        tokens = [
-            part for part in re.split(r"\s+|[-_]", name.lower()) if len(part) > 2
-        ]
-        matches = []
-        for path in files:
-            lower = str(path).lower()
-            if any(token in lower for token in tokens):
-                matches.append(str(path))
-            if len(matches) >= 6:
-                break
-        return matches
-
-    def _fallback_flow(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> List[str]:
-        flow = ["User"]
-        frontend = self._find_frontend_component(tech_names)
-        backend = self._find_backend_component(tech_names)
-        top_level = [
-            str(name).lower() for name in payload.get("top_level_modules", [])
-        ]
-
-        if frontend:
-            flow.append(frontend)
-        elif "frontend" in top_level:
-            flow.append("Frontend")
-
-        if self._has_tech(tech_names, "api gateway"):
-            flow.append("API Gateway")
-        elif backend:
-            flow.append(backend)
-        elif any(
-            self._has_tech(tech_names, key)
-            for key in ("fastapi", "express", "nest", "flask", "django")
-        ):
-            flow.append("HTTP API")
-        elif any(
-            name in top_level for name in ("backend", "server", "api")
-        ):
-            flow.append("Backend Service")
-
-        if self._has_tech(tech_names, "lambda"):
-            if "API Gateway" not in flow:
-                flow.append("API Gateway")
-            flow.append("AWS Lambda")
-
-        if self._has_tech(tech_names, "sns"):
-            flow.append("SNS")
-        if self._has_tech(tech_names, "sqs"):
-            flow.append("SQS")
-
-        if self._has_tech(tech_names, "ecs"):
-            flow.append("ECS Container")
-        elif self._has_tech(tech_names, "eks") or self._has_tech(
-            tech_names, "kubernetes"
-        ):
-            flow.append("Kubernetes Pod")
-        elif self._has_tech(tech_names, "docker"):
-            flow.append("Docker Container")
-
-        for needle, label in (
-            ("postgresql", "PostgreSQL"),
-            ("mysql", "MySQL"),
-            ("mongodb", "MongoDB"),
-            ("redis", "Redis"),
-            ("dynamodb", "DynamoDB"),
-            ("s3", "S3"),
-            ("cloudwatch", "CloudWatch"),
-        ):
-            if self._has_tech(tech_names, needle):
-                flow.append(label)
-                break
-        else:
-            if self._has_tech(tech_names, "database"):
-                flow.append("Storage")
-
-        flow.append("Response")
-        return list(dict.fromkeys(flow))
-
-    def _fallback_component_responsibility(self, name: str) -> str:
-        lowered = name.lower()
-        if "user" in lowered:
-            return "Initiates the workflow and receives the final outcome."
-        if any(word in lowered for word in ("frontend", "react", "next")):
-            return "Handles user interaction and sends application requests to the backend."
-        if "api gateway" in lowered:
-            return "Routes incoming API requests before they reach service logic."
-        if any(
-            word in lowered
-            for word in ("fastapi", "express", "flask", "django", "http api")
-        ):
-            return "Processes HTTP requests and coordinates application logic."
-        if "lambda" in lowered:
-            return "Executes serverless business logic in response to API or queue events."
-        if "sqs" in lowered or "sns" in lowered:
-            return "Manages asynchronous event delivery for background processing."
-        if "dynamodb" in lowered:
-            return "Stores and retrieves application data in a managed NoSQL table."
-        if any(
-            word in lowered
-            for word in ("postgresql", "mysql", "mongodb", "redis")
-        ):
-            return "Provides persistent storage for application data."
-        if "s3" in lowered:
-            return "Holds application objects, assets, or processed output."
-        if any(
-            word in lowered
-            for word in ("terraform", "docker", "kubernetes", "ecs")
-        ):
-            return "Represents deployment infrastructure rather than runtime execution."
-        return "Performs a runtime responsibility inferred from repository evidence."
-
-    def _fallback_communication(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> List[str]:
-        communication = []
-        if payload.get("api_routes") or any(
-            self._has_tech(tech_names, key)
-            for key in ("fastapi", "express", "flask", "django")
-        ):
-            communication.append(
-                "REST APIs: Components communicate through HTTP endpoints exposed by the backend."
-            )
-        if self._has_tech(tech_names, "sqs"):
-            communication.append(
-                "SQS: Queued messages hand off work to background workers."
-            )
-        if self._has_tech(tech_names, "sns"):
-            communication.append(
-                "SNS: Pub/sub messages broadcast events to downstream services."
-            )
-        if self._has_tech(tech_names, "websocket") or self._has_tech(
-            tech_names, "socket.io"
-        ):
-            communication.append(
-                "WebSockets: Real-time updates are exchanged over bidirectional sockets."
-            )
-        if any(
-            self._has_tech(tech_names, key)
-            for key in ("dynamodb", "postgresql", "mysql", "mongodb", "redis")
-        ):
-            communication.append(
-                "Database access: Runtime components communicate with persistence services."
-            )
-        return communication or [UNKNOWN]
-
-    def _build_sync_async_paths(
-        self, tech_names: Dict[str, List[str]], flow: List[str]
-    ) -> tuple[list[str], list[str]]:
-        sync_path = []
-        async_path = []
-
-        if "User" in flow and any(
-            self._has_tech(tech_names, key)
-            for key in ("react", "next", "vue", "svelte", "angular")
-        ):
-            sync_path.extend(
-                ["User", self._find_frontend_component(tech_names) or "Frontend"]
-            )
-        elif "User" in flow:
-            sync_path.append("User")
-
-        if "API Gateway" in flow:
-            sync_path.append("API Gateway")
-        elif any(
-            self._has_tech(tech_names, key)
-            for key in ("fastapi", "express", "flask", "django", "nest")
-        ):
-            sync_path.append(self._find_backend_component(tech_names) or "HTTP API")
-
-        if self._has_tech(tech_names, "lambda"):
-            sync_path.append("AWS Lambda")
-
-        if self._has_tech(tech_names, "sqs"):
-            async_path.append("SQS")
-        if self._has_tech(tech_names, "sns"):
-            async_path.append("SNS")
-        if async_path:
-            async_path.append("Worker")
-
-        if self._has_tech(tech_names, "dynamodb"):
-            async_path.append("DynamoDB")
-        elif self._has_tech(tech_names, "s3"):
-            async_path.append("S3")
-
-        if not sync_path and not async_path:
-            return [], []
-        if sync_path and sync_path[-1] != "Response":
-            sync_path.append("Response")
-        return sync_path, async_path
-
-    def _fallback_component_input(
-        self, name: str, tech_names: Dict[str, List[str]]
-    ) -> str:
-        lowered = name.lower()
-        if any(word in lowered for word in ("frontend", "react", "next")):
-            return "User actions and browser events"
-        if "api gateway" in lowered:
-            return "HTTP requests from client or frontend"
-        if any(
-            word in lowered
-            for word in ("fastapi", "express", "flask", "django", "http api")
-        ):
-            return "HTTP request payload"
-        if "lambda" in lowered:
-            return "API events or queue messages"
-        if "sqs" in lowered or "sns" in lowered:
-            return "Event messages from application services"
-        if any(
-            word in lowered
-            for word in ("dynamodb", "postgresql", "mysql", "mongodb", "redis")
-        ):
-            return "Data queries and persistence requests"
-        if "s3" in lowered:
-            return "Object write/read requests"
-        return "Runtime input based on detected component behavior."
-
-    def _fallback_component_output(
-        self, name: str, tech_names: Dict[str, List[str]]
-    ) -> str:
-        lowered = name.lower()
-        if any(word in lowered for word in ("frontend", "react", "next")):
-            return "API calls and user interface updates"
-        if "api gateway" in lowered:
-            return "Forwarded requests to backend services"
-        if any(
-            word in lowered
-            for word in ("fastapi", "express", "flask", "django", "http api")
-        ):
-            return "Backend responses or queued work requests"
-        if "lambda" in lowered:
-            return "Function results or queue/notification events"
-        if "sqs" in lowered or "sns" in lowered:
-            return "Queued messages to workers or subscribers"
-        if any(
-            word in lowered
-            for word in ("dynamodb", "postgresql", "mysql", "mongodb", "redis")
-        ):
-            return "Stored or retrieved persistence results"
-        if "s3" in lowered:
-            return "Stored objects or static content links"
-        return "Runtime output based on component activity."
-
-    def _fallback_component_communications(
-        self, name: str, flow: List[str]
-    ) -> List[str]:
-        lowered = name.lower()
-        communications = []
-
-        if any(word in lowered for word in ("frontend", "react", "next")):
-            communications.extend(["API Gateway", "Backend Service"])
-        if "api gateway" in lowered:
-            communications.extend(["Frontend", "Backend Service"])
-        if any(
-            word in lowered
-            for word in ("fastapi", "express", "flask", "django", "http api")
-        ):
-            communications.extend(["Frontend", "DynamoDB", "S3", "SQS", "SNS"])
-        if "lambda" in lowered:
-            communications.extend(["API Gateway", "SQS", "SNS", "DynamoDB", "S3"])
-        if "sqs" in lowered or "sns" in lowered:
-            communications.extend(["Worker", "Backend Service"])
-        if any(
-            word in lowered
-            for word in ("dynamodb", "postgresql", "mysql", "mongodb", "redis")
-        ):
-            communications.extend(["Backend Service", "Lambda"])
-        if "s3" in lowered:
-            communications.extend(["Backend Service", "Lambda"])
-
-        if not communications and name in flow:
-            index = flow.index(name)
-            if index > 0:
-                communications.append(flow[index - 1])
-            if index + 1 < len(flow):
-                communications.append(flow[index + 1])
-
-        return list(dict.fromkeys(item for item in communications if item))
-
-    def _fallback_deployment(
-        self, tech_names: Dict[str, List[str]], payload: Dict[str, Any]
-    ) -> str:
-        infrastructure_files = (
-            payload.get("code_signals", {}).get("infrastructure_files", [])
-        )
-        evidence = " ".join(str(path) for path in infrastructure_files).lower()
-
-        if self._has_tech(tech_names, "terraform") or ".tf" in evidence:
-            if self._has_tech(tech_names, "lambda"):
-                return "Serverless deployment on AWS Lambda with Terraform provisioning."
-            if self._has_tech(tech_names, "ecs"):
-                return "Container-based deployment on ECS with Terraform infrastructure definitions."
-            if self._has_tech(tech_names, "eks") or self._has_tech(
-                tech_names, "kubernetes"
-            ):
-                return "Kubernetes deployment defined through Terraform manifests."
-            return "Terraform-provisioned infrastructure is used for deployment."
-
-        if self._has_tech(tech_names, "docker") or "docker" in evidence:
-            return "Container-based deployment is supported by Docker configuration evidence."
-        if self._has_tech(tech_names, "serverless") or self._has_tech(
-            tech_names, "lambda"
-        ):
-            return "Serverless deployment is supported by AWS Lambda evidence."
-        if any(
-            self._has_tech(tech_names, cloud)
-            for cloud in ("aws", "gcp", "azure")
-        ):
-            return "Cloud-native deployment is indicated by cloud service detection."
-        return UNKNOWN
 
     def architecture_summary_text(self, analysis: Dict[str, Any]) -> str:
         architecture = analysis.get("architecture", {})
@@ -2131,144 +1324,3 @@ Rules:
                 )
             )
         return "\n\n".join(parts)
-
-    def generate_overview(self, *args: Any, **kwargs: Any) -> str:
-        if "metadata" in kwargs and "scan" in kwargs and "stack" in kwargs:
-            analysis = self.generate_repository_analysis(
-                metadata=kwargs["metadata"],
-                readme=kwargs["scan"].get("readme", ""),
-                stack=kwargs["stack"],
-                repository_structure=[],
-                scan=kwargs["scan"],
-            )
-            return analysis["overview"]
-
-        repo_name = kwargs.get("repo_name") or (
-            args[0] if args else "Repository"
-        )
-        payload = {
-            "metadata": {
-                "full_name": repo_name,
-                "description": kwargs.get("description") or "",
-            },
-            "readme_summary": kwargs.get("readme", ""),
-            "detected_technology_stack": kwargs.get("technologies", {}),
-            "repository_structure": kwargs.get("repo_structure", []),
-            "top_level_modules": [],
-            "detected_cloud_infrastructure": {},
-            "analysis_evidence": {},
-            "file_tree": [],
-        }
-        return self._fallback_analysis(payload)["overview"]
-
-    def generate_modules(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-        if "scan" in kwargs and "stack" in kwargs:
-            analysis = self.generate_repository_analysis(
-                metadata={},
-                readme=kwargs["scan"].get("readme", ""),
-                stack=kwargs["stack"],
-                repository_structure=[],
-                scan=kwargs["scan"],
-            )
-            return analysis["modules"]
-
-        structure = kwargs.get("repo_structure", [])
-        technologies = kwargs.get("technologies", {})
-        payload = {
-            "metadata": {"full_name": kwargs.get("repo_name", "Repository")},
-            "readme_summary": "",
-            "detected_technology_stack": technologies,
-            "repository_structure": structure,
-            "top_level_modules": [
-                node.get("name")
-                for node in structure
-                if isinstance(node, dict) and node.get("type") == "folder"
-            ],
-            "detected_cloud_infrastructure": {},
-            "analysis_evidence": {},
-            "file_tree": [],
-        }
-        return self._fallback_analysis(payload)["modules"]
-
-    def generate_architecture_summary(self, *args: Any, **kwargs: Any) -> str:
-        if "scan" in kwargs and "stack" in kwargs:
-            analysis = self.generate_repository_analysis(
-                metadata={},
-                readme=kwargs["scan"].get("readme", ""),
-                stack=kwargs["stack"],
-                repository_structure=[],
-                scan=kwargs["scan"],
-            )
-            return self.architecture_summary_text(analysis)
-
-        analysis = self._fallback_analysis(
-            {
-                "metadata": {"full_name": kwargs.get("repo_name", "Repository")},
-                "readme_summary": kwargs.get("readme", ""),
-                "detected_technology_stack": kwargs.get("technologies", {}),
-                "repository_structure": kwargs.get("repo_structure", []),
-                "top_level_modules": [],
-                "detected_cloud_infrastructure": {},
-                "analysis_evidence": {},
-                "file_tree": [],
-            }
-        )
-        return self.architecture_summary_text(analysis)
-
-    def generate_ai_insights(self, *args: Any, **kwargs: Any) -> List[str]:
-        analysis: Dict[str, Any] | None = kwargs.get("analysis")
-        if analysis is None and args:
-            candidate = args[0]
-            if isinstance(candidate, dict):
-                analysis = candidate
-        if analysis is None:
-            analysis = {
-                "overview": kwargs.get("overview"),
-                "executive_overview": kwargs.get("executive_overview"),
-                "modules": kwargs.get("modules"),
-            }
-
-        if not isinstance(analysis, dict):
-            return []
-
-        insight_candidates: List[str] = []
-        executive = analysis.get("executive_overview")
-        if isinstance(executive, dict):
-            raw_features = executive.get("user_features")
-            if isinstance(raw_features, list):
-                for feature in raw_features:
-                    if not isinstance(feature, dict):
-                        continue
-                    name = str(feature.get("name") or "").strip()
-                    description = str(feature.get("description") or "").strip()
-                    if name and description:
-                        insight_candidates.append(f"{name}: {description}")
-                    elif name:
-                        insight_candidates.append(name)
-
-        for module in analysis.get("modules") or []:
-            if not isinstance(module, dict):
-                continue
-            name = str(module.get("name") or "").strip()
-            purpose = str(module.get("purpose") or module.get("description") or "").strip()
-            if not name:
-                continue
-            if purpose:
-                insight_candidates.append(f"{name}: {purpose}")
-            else:
-                insight_candidates.append(name)
-
-        overview = str(analysis.get("overview") or "").strip()
-        if overview and not insight_candidates:
-            insight_candidates.append(overview)
-
-        deduped: List[str] = []
-        seen: set[str] = set()
-        for entry in insight_candidates:
-            cleaned = re.sub(r"\s+", " ", entry).strip()
-            if not cleaned or cleaned.lower() in seen:
-                continue
-            seen.add(cleaned.lower())
-            deduped.append(cleaned)
-
-        return deduped[:10]

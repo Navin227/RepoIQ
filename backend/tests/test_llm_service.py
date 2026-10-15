@@ -118,9 +118,10 @@ def test_llm_service_falls_back_when_gemini_fails(monkeypatch):
         },
     )
 
-    assert analysis["overview"]
+    assert analysis["overview"] == ""
+    assert analysis["analysis_status"] == "degraded"
     assert analysis["modules"] == []
-    assert analysis["executive_overview"]["user_features"] == []
+    assert analysis["executive_overview"] is None
     assert {"summary", "flow"} <= set(analysis["architecture"])
 
 
@@ -154,62 +155,13 @@ def test_gemini_modules_without_repository_evidence_are_not_returned(monkeypatch
     assert analysis["analysis_evidence"]["source_file_count"] == 0
 
 
-def test_fallback_architecture_uses_supported_architecture_type():
+def test_legacy_fallback_generators_are_retired():
     service = LLMService()
-    payload = {
-        "metadata": {"full_name": "acme/files", "description": "File tools"},
-        "readme_summary": "",
-        "detected_technology_stack": {
-            "categories": {
-                "frontend": [{"name": "React"}],
-                "backend": [{"name": "FastAPI"}],
-                "database": [{"name": "PostgreSQL"}],
-                "infrastructure": [{"name": "Terraform"}],
-                "cloud": [{"name": "AWS"}],
-            }
-        },
-        "repository_structure": [],
-        "top_level_modules": ["frontend", "backend", "infra"],
-        "detected_cloud_infrastructure": {},
-    }
-
-    analysis = service._fallback_analysis(payload)
-
-    assert analysis["architecture"]["architecture_type"] == "Layered"
-
-
-def test_fallback_overview_and_features_use_readme_product_evidence():
-    service = LLMService()
-    payload = service._build_input_payload(
-        {"full_name": "acme/catalog", "description": "Repository tooling"},
-        (
-            "# Acme Catalog\n\n"
-            "Acme Catalog helps independent shops publish and manage their "
-            "online product catalogs.\n\n"
-            "## Features\n"
-            "- **Publish products**: Create product pages and share them with customers.\n"
-            "- **Track orders**: Review incoming customer orders in one place.\n\n"
-            "## Installation\nRun the development server."
-        ),
-        {"categories": {}},
-        [],
-        {
-            "files": ["src/products.ts", "src/orders.ts"],
-            "dependencies": {},
-            "source_previews": {},
-        },
-    )
-
-    analysis = service._fallback_analysis(payload)
-    executive = analysis["executive_overview"]
-
-    assert "publish and manage their online product catalogs" in analysis["overview"]
-    assert "independent shops" in executive["what_is_this_project"][0]
-    assert [feature["name"] for feature in executive["user_features"]] == [
-        "Publish products",
-        "Track orders",
-    ]
-    assert all(feature["evidence"] == ["README.md"] for feature in executive["user_features"])
+    assert not hasattr(service, "_fallback_analysis")
+    assert not hasattr(service, "generate_overview")
+    assert not hasattr(service, "generate_modules")
+    assert not hasattr(service, "generate_architecture_summary")
+    assert not hasattr(service, "generate_ai_insights")
 
 
 def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch):
@@ -315,7 +267,7 @@ def test_repo_scanner_keeps_relevant_files_when_inventory_is_large(tmp_path):
     scan = __import__("app.utils.repo_scanner", fromlist=["RepoScanner"]).RepoScanner().scan(repo)
 
     assert app_file.relative_to(repo).as_posix() in scan["files"]
-    assert len(scan["files"]) <= 2000
+    assert len(scan["files"]) == 2501
 
 
 def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
@@ -384,8 +336,7 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
     )
 
     assert analysis["analysis_status"] == "ai_generated"
-    assert analysis["ai_insights"]
-    assert "Upload files" in analysis["ai_insights"][0]
+    assert analysis["ai_insights"] == []
 
 
 def test_llm_service_drops_architecture_components_without_repo_evidence():
@@ -432,6 +383,23 @@ def test_llm_service_drops_architecture_components_without_repo_evidence():
 
     assert analysis["modules"][0]["name"] == "Authentication"
     assert [component["name"] for component in analysis["architecture"]["components"]] == ["API Gateway"]
+
+
+def test_duplicate_features_are_deduplicated_by_name():
+    service = LLMService()
+    payload = {
+        "source_evidence": {"selected_source_file_details": [{"path": "src/upload.ts", "role": "frontend_page"}]},
+        "analysis_evidence": {},
+        "file_tree": ["src/upload.ts"],
+        "top_level_modules": [],
+    }
+    normalized = service._normalize_executive_overview({
+        "user_features": [
+            {"name": "Upload files", "description": "Upload a file", "evidence": ["src/upload.ts"]},
+            {"name": "Upload files", "description": "Upload files to storage", "evidence": ["src/upload.ts"]},
+        ]
+    }, payload)
+    assert [feature["name"] for feature in normalized["user_features"]] == ["Upload files"]
 
 
 def test_repomix_context_is_optional_and_secure(monkeypatch, tmp_path):

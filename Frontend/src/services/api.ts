@@ -351,6 +351,7 @@ export interface AnalyzeRepositoryResponse {
   repo_url?: string;
   local_path?: string;
   readme?: string;
+  readme_path?: string;
   stack?: {
     categories?: Partial<TechStack>;
     flat?: TechStack;
@@ -365,6 +366,8 @@ export interface AnalyzeRepositoryResponse {
   modules?: BusinessModule[];
   analysis_evidence?: Record<string, unknown>;
   analysis_status?: string;
+  commit_sha?: string;
+  repository_model?: Record<string, unknown>;
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
   message?: string;
@@ -520,6 +523,7 @@ export async function analyzeRepository(
         repoUrl: result.repo_url,
         localPath: result.local_path,
         readme: result.readme,
+        readmePath: result.readme_path,
         stack: result.stack,
         folderStructure: result.folder_structure,
         projectSummary: result.architecture_summary,
@@ -532,6 +536,8 @@ export async function analyzeRepository(
         similar_repositories: result.similar_repositories,
         analysis_evidence: result.analysis_evidence ?? {},
         analysis_status: result.analysis_status,
+        commit_sha: result.commit_sha,
+        repository_model: result.repository_model,
         ai_insights: result.ai_insights ?? keyFeatures,
         languages: result.languages,
       };

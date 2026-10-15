@@ -384,10 +384,14 @@ class GitHubService:
 
             git_dir = repo_dir / ".git"
             if git_dir.exists():
-                return {
-                    "repo_name": repo_name,
-                    "local_path": repo_dir.as_posix(),
-                }
+                # Never reuse a prior checkout: each analysis observes a fresh remote HEAD.
+                suffix = 1
+                while True:
+                    candidate = repo_dir.parent / f"{repo_dir.name}_{suffix}"
+                    if not candidate.exists():
+                        repo_dir = candidate.resolve(strict=False)
+                        break
+                    suffix += 1
 
             logger.warning(
                 "Clone target already exists but is not a valid repository; preserving user data and creating a distinct clone directory."
@@ -422,9 +426,11 @@ class GitHubService:
             )
             raise RuntimeError("Failed to clone repository") from exc
 
+        revision = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
         return {
             "repo_name": repo_name,
             "local_path": repo_dir.as_posix(),
+            "commit_sha": revision,
         }
 
     def find_readme_path(
@@ -509,10 +515,9 @@ class GitHubService:
             return None
 
         try:
-            return readme_path.read_text(
-                encoding="utf-8",
-                errors="replace",
-            )
+            # Decode bytes directly so universal newline conversion cannot alter
+            # the README that is persisted and returned by the API.
+            return readme_path.read_bytes().decode("utf-8", errors="replace")
         except OSError as exc:
             logger.warning(
                 "Could not read README at %s: %s",

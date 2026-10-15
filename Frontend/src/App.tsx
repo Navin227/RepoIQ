@@ -558,6 +558,7 @@ export default function App() {
 
           readme:
             result.readme ?? '',
+          readmePath: result.readmePath,
 
           overview: {
             aiSummary: result.overview || '',
@@ -566,7 +567,7 @@ export default function App() {
           },
 
           analysis: {
-            projectSummary: result.architecture_summary || '',
+            projectSummary: result.overview || '',
 
             techStack: result.stack?.flat || {
                 frontend: [],
@@ -577,12 +578,9 @@ export default function App() {
               },
 
             keyFeatures:
-              (result.ai_insights && result.ai_insights.length > 0
-                ? result.ai_insights
-                : (result.executive_overview?.user_features ?? []).map(
+              ((result.executive_overview?.user_features ?? []).map(
                     (feature) => feature?.name || ''
-                  ).filter(Boolean)
-              ).slice(0, 10),
+                  ).filter(Boolean)).slice(0, 10),
 
             businessModules: (result.modules || []).map(
                 module => ({
@@ -636,6 +634,9 @@ export default function App() {
 
           analysisEvidence:
             result.analysis_evidence ?? {},
+          analysisStatus: result.analysis_status ?? result.status,
+          commitSha: result.commit_sha,
+          repositoryModel: result.repository_model,
         });
 
         setAnalyzeMessageByUrl(prev => ({

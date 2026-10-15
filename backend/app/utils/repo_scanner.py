@@ -37,7 +37,6 @@ IGNORED_DIRS = {
     "tmp",
     "temp",
 }
-MAX_REPO_INVENTORY_FILES = 2000
 ENTRYPOINT_FILENAMES = {
     "main.py",
     "app.py",
@@ -178,7 +177,7 @@ class RepoScanner:
                 ranked_paths.append((self._path_relevance_score(relative_path), relative_path))
 
         ranked_paths.sort(key=lambda item: (-item[0], item[1].lower()))
-        return [relative_path for _, relative_path in ranked_paths[:MAX_REPO_INVENTORY_FILES]]
+        return [relative_path for _, relative_path in ranked_paths]
 
     def _collect_dependencies_recursive(self, repo_path: Path) -> Dict[str, Any]:
         dependencies = {}

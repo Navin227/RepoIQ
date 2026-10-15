@@ -14,6 +14,7 @@ class AnalyzeResponse(BaseModel):
     repo_url: Optional[str] = None
     local_path: Optional[str] = None
     readme: Optional[str] = None
+    readme_path: Optional[str] = None
     stack: Optional[Dict[str, Any]] = None
     folder_structure: Optional[List[Any]] = None
     languages: Optional[List[str]] = None
@@ -26,4 +27,6 @@ class AnalyzeResponse(BaseModel):
     similar_repositories: Optional[List[Dict[str, Any]]] = None
     analysis_evidence: Optional[Dict[str, Any]] = None
     analysis_status: Optional[str] = None
+    commit_sha: Optional[str] = None
+    repository_model: Optional[Dict[str, Any]] = None
     message: Optional[str] = None

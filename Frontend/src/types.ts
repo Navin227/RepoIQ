@@ -45,6 +45,7 @@ export interface Repository {
   url: string;
   localPath?: string;
   readme?: string;
+  readmePath?: string;
   overview: {
     aiSummary: string;
     executiveOverview?: ExecutiveOverview;
@@ -74,6 +75,9 @@ export interface Repository {
   rawStack?: RawTechStack;
   architecture?: ArchitectureAnalysis;
   analysisEvidence?: Record<string, unknown>;
+  analysisStatus?: string;
+  commitSha?: string;
+  repositoryModel?: Record<string, unknown>;
 }
 
 export interface ArchitectureComponent {
@@ -154,6 +158,7 @@ export interface AnalysisResult {
   repoUrl?: string;
   localPath?: string;
   readme?: string;
+  readmePath?: string;
   stack?: {
     categories?: Partial<TechStack>;
     flat?: TechStack;
@@ -170,6 +175,8 @@ export interface AnalysisResult {
   similar_repositories?: SimilarRepo[];
   analysis_evidence?: Record<string, unknown>;
   analysis_status?: string;
+  commit_sha?: string;
+  repository_model?: Record<string, unknown>;
   languages?: string[]; // Add languages
   error?: string;
 }

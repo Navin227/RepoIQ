@@ -7,7 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "test:api": "node --import tsx --test src/services/api-base.test.ts",
+    "test:api": "node --import tsx --test src/services/api-base.test.ts src/services/readme-links.test.ts src/services/readme-render.test.tsx",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
@@ -21,6 +21,8 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {
