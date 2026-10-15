@@ -86,7 +86,7 @@ def test_coverage_filter_distinguishes_partial_ranges_and_keeps_valid_reference(
     }]
     result = _filter_claims_by_coverage(claims, {"files": [{
         "path": "SRC/ORDERS.PY", "status": "partially_inspected",
-        "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 5}],
+        "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 5}],
     }]})
 
     assert len(result[0]["evidence"]) == 1

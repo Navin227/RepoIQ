@@ -109,9 +109,9 @@ def _filter_claims_by_coverage(claims: list, manifest: dict) -> list:
             if entry is None:
                 reasons.append({"reason_code": "path_not_in_manifest", "stage": "coverage_filter", "path": path})
                 continue
-            supplied_ranges = _as_list(entry.get("gemini_supplied_line_ranges"))
+            supplied_ranges = _as_list(entry.get("grok_supplied_line_ranges"))
             start, end = ref.get("start_line"), ref.get("end_line")
-            if "gemini_supplied_line_ranges" in entry and not any(
+            if "grok_supplied_line_ranges" in entry and not any(
                 isinstance(bounds, dict)
                 and isinstance(start, int) and isinstance(end, int)
                 and start >= int(bounds.get("start_line") or 1)
@@ -160,8 +160,8 @@ def _validate_report_recommendations(report: dict, retrieval: RepositoryRetrieva
             if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
                 rejected_refs.append({"reason_code": "invalid_line_range", "stage": "recommendation_validation", "path": path})
                 continue
-            supplied_ranges = _as_list(entry.get("gemini_supplied_line_ranges"))
-            if "gemini_supplied_line_ranges" in entry and not any(
+            supplied_ranges = _as_list(entry.get("grok_supplied_line_ranges"))
+            if "grok_supplied_line_ranges" in entry and not any(
                 isinstance(bounds, dict)
                 and start >= int(bounds.get("start_line") or 1)
                 and end <= int(bounds.get("end_line") or 0)

@@ -18,7 +18,7 @@ def test_complete_result_does_not_require_optional_fields_or_every_claim():
     result["analysis_evidence"] = {"coverage_manifest": {"omitted_count": 20}}
     classification = classify_analysis_status(
         result,
-        pipeline={"context_preparation": {"status": "partial"}, "gemini_output": {"status": "partial"}},
+        pipeline={"context_preparation": {"status": "partial"}, "grok_output": {"status": "partial"}},
         coverage_gate={"status": "sufficient", "core_execution_paths_sufficiently_covered": True},
     )
     assert classification["status"] == "complete"
@@ -42,10 +42,10 @@ def test_weak_main_claims_are_partial_but_rejected_optional_claim_is_not():
 
 
 def test_provider_failure_is_failed_and_low_source_evidence_is_unavailable():
-    failed = classify_analysis_status(useful_analysis(), pipeline={"gemini": {"status": "failed"}})
+    failed = classify_analysis_status(useful_analysis(), pipeline={"grok": {"status": "failed"}})
     unavailable = classify_analysis_status({}, coverage_gate={"status": "insufficient"}, insufficient_inputs=True)
     assert failed["status"] == "failed"
-    assert failed["reasons"][0]["code"] == "gemini_failed"
+    assert failed["reasons"][0]["code"] == "grok_failed"
     assert unavailable["status"] == "unavailable"
 
 

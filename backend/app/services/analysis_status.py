@@ -19,7 +19,7 @@ def classify_analysis_status(
     pipeline = pipeline if isinstance(pipeline, dict) else {}
     gate = coverage_gate if isinstance(coverage_gate, dict) else {}
     reasons: list[dict[str, str]] = []
-    failed_stages = [name for name in ("context_preparation", "gemma", "gemini", "gemini_output")
+    failed_stages = [name for name in ("context_preparation", "gemma", "grok", "grok_output")
                      if isinstance(pipeline.get(name), dict)
                      and pipeline[name].get("status") in {"failed", "malformed"}
                      and not (name == "context_preparation" and insufficient_inputs

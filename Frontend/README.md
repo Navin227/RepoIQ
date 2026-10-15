@@ -15,7 +15,7 @@ View your app in AI Studio: https://ai.studio/apps/42bec242-62e0-4db3-881f-ffa9e
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set `GROK_API_KEY` in the backend environment (for local runs, `backend/.env`) to your xAI API key. Keep provider keys out of frontend environment files.
 3. Run the app:
    `npm run dev`
 

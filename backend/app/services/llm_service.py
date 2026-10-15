@@ -6,6 +6,8 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
+import httpx
+
 from app.config import settings
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 UNKNOWN = "Unable to confidently determine from repository evidence."
 
 
-def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, budget: int) -> tuple[Dict[str, Any], str, dict[str, Any]]:
+def _fit_grok_input(payload: Dict[str, Any], instructions: str, count_tokens, budget: int) -> tuple[Dict[str, Any], str, dict[str, Any]]:
     """Fit the actual final prompt and account for every context omission."""
     provider_payload = json.loads(json.dumps(payload, ensure_ascii=False))
     omissions: list[dict[str, Any]] = []
@@ -36,22 +38,22 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
         if isinstance(item, dict) and item.get("path")
     }
     for entry in coverage_files.values():
-        entry["gemini_supplied_line_ranges"] = []
-        entry["gemini_omitted_line_ranges"] = []
+        entry["grok_supplied_line_ranges"] = []
+        entry["grok_omitted_line_ranges"] = []
     for excerpt in excerpts:
         if isinstance(excerpt, dict) and excerpt.get("path") in coverage_files:
-            coverage_files[excerpt["path"]]["gemini_supplied_line_ranges"].append({"start_line": excerpt.get("start_line"), "end_line": excerpt.get("end_line")})
+            coverage_files[excerpt["path"]]["grok_supplied_line_ranges"].append({"start_line": excerpt.get("start_line"), "end_line": excerpt.get("end_line")})
     manifest: dict[str, Any] = {"budget_tokens": budget, "estimated_tokens": None, "estimated": False, "omitted_source_ranges": omissions, "omitted_fields": removed_fields}
 
     def build_prompt() -> str:
-        provider_payload["gemini_input_manifest"] = manifest
+        provider_payload["grok_input_manifest"] = manifest
         return instructions + "\n\nRepository input:\n" + json.dumps(provider_payload, ensure_ascii=False, indent=2)
 
     def measure(prompt: str) -> int:
         try:
             measured = count_tokens(prompt)
             if not isinstance(measured, int) or measured < 1:
-                raise ValueError("Gemini token counter returned no token count")
+                raise ValueError("Grok token counter returned no token count")
             return measured
         except Exception:
             manifest["estimated"] = True
@@ -72,18 +74,18 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
         if not paths:
             break
         # Remove lower-priority paths in deterministic groups to bound calls to
-        # Gemini's token counter while preserving execution-path evidence first.
+        # Re-estimate the local prompt size while preserving execution-path evidence first.
         drop_paths = paths[:max(1, (len(paths) + 7) // 8)]
         keep = []
         for item in excerpts:
             if not isinstance(item, dict) or item.get("path") not in drop_paths:
                 keep.append(item)
                 continue
-            omissions.append({"path": item["path"], "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "gemini_input_token_budget"})
+            omissions.append({"path": item["path"], "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "grok_input_token_budget"})
             if item.get("path") in coverage_files:
                 entry = coverage_files[item["path"]]
-                entry["gemini_supplied_line_ranges"] = [r for r in entry["gemini_supplied_line_ranges"] if r != {"start_line": item.get("start_line"), "end_line": item.get("end_line")}]
-                entry["gemini_omitted_line_ranges"].append({"start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "gemini_input_token_budget"})
+                entry["grok_supplied_line_ranges"] = [r for r in entry["grok_supplied_line_ranges"] if r != {"start_line": item.get("start_line"), "end_line": item.get("end_line")}]
+                entry["grok_omitted_line_ranges"].append({"start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "grok_input_token_budget"})
         excerpts = keep
         context_bundle["source_excerpts"] = excerpts
         prompt = build_prompt()
@@ -95,7 +97,7 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
             break
         if field in provider_payload:
             provider_payload.pop(field)
-            removed_fields.append({"field": field, "reason": "gemini_input_token_budget_duplicate_inventory"})
+            removed_fields.append({"field": field, "reason": "grok_input_token_budget_duplicate_inventory"})
             prompt = build_prompt()
             token_count = measure(prompt)
 
@@ -113,8 +115,8 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
         drop_count = max(1, (len(candidates) + 7) // 8)
         for item in candidates[:drop_count]:
             item["content"] = ""
-            item["content_omitted_reason"] = "Gemini input token budget"
-            omissions.append({"path": item.get("path"), "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "Gemini input token budget"})
+            item["content_omitted_reason"] = "Grok input token budget"
+            omissions.append({"path": item.get("path"), "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "Grok input token budget"})
         prompt = build_prompt()
         token_count = measure(prompt)
 
@@ -126,7 +128,7 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
             gate["status"] = "partial"
             gate["core_execution_paths_sufficiently_covered"] = False
             gate["known_critical_dependencies_not_inspected"] = sorted(set(gate.get("known_critical_dependencies_not_inspected", [])) | set(dropped_critical))
-            gate["reason"] = "Gemini input budget omitted evidence from critical execution paths"
+            gate["reason"] = "Grok input budget omitted evidence from critical execution paths"
             context_bundle["coverage_gate"] = gate
             coverage_manifest = context_bundle.get("coverage_manifest")
             if isinstance(coverage_manifest, dict):
@@ -142,22 +144,22 @@ def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, 
 
 
 class LLMService:
-    def __init__(self, provider: str = "gemini") -> None:
+    def __init__(self, provider: str = "grok") -> None:
         self.provider = provider
 
     @staticmethod
-    def _validate_gemini_output(value: Dict[str, Any]) -> dict[str, Any]:
+    def _validate_grok_output(value: Dict[str, Any]) -> dict[str, Any]:
         if not isinstance(value, dict):
-            raise RuntimeError("Gemini returned malformed output: expected a JSON object")
+            raise RuntimeError("Grok returned malformed output: expected a JSON object")
         if not any(value.get(key) for key in ("overview", "executive_overview", "claims", "modules", "architecture", "report_sections")):
-            raise RuntimeError("Gemini returned malformed output: no report content")
+            raise RuntimeError("Grok returned malformed output: no report content")
         expected = {"overview": str, "executive_overview": dict, "claims": list, "modules": list,
                     "architecture": dict, "report_sections": dict, "investigation_requests": list}
         missing = sorted(set(expected) - set(value))
         wrong_types = sorted(key for key, kind in expected.items() if key in value and not isinstance(value[key], kind))
         incomplete = bool(missing or wrong_types)
         return {"status": "partial" if incomplete else "complete",
-                "code": "gemini_partial_output" if incomplete else "ok",
+                "code": "grok_partial_output" if incomplete else "ok",
                 "missing_fields": missing, "invalid_type_fields": wrong_types}
 
     @staticmethod
@@ -198,7 +200,7 @@ class LLMService:
         context_bundle = None
         context_error = None
         context_diagnostic = {"status": "skipped", "code": "no_repository_path"}
-        gemini_output_diagnostic = {"status": "not_received", "code": "not_run"}
+        grok_output_diagnostic = {"status": "not_received", "code": "not_run"}
         if repo_path:
             context_diagnostic = {"status": "failed", "code": "context_preparation_failure"}
             try:
@@ -220,7 +222,7 @@ class LLMService:
         try:
             if context_error:
                 raise context_error
-            self._log_gemini_input(
+            self._log_grok_input(
                 analysis_id,
                 self.provider,
                 json.dumps(payload, ensure_ascii=False, indent=2),
@@ -235,8 +237,8 @@ class LLMService:
                           "source_excerpt_count": len((payload.get("context_bundle") or {}).get("source_excerpts", [])),
                           "coverage_gate": (payload.get("context_bundle") or {}).get("coverage_gate"),
                           "deterministic_evidence_present": bool(payload.get("analysis_evidence"))})
-            response_text = self._generate_with_gemini(payload)
-            self._log_gemini_output(analysis_id, self.provider, response_text)
+            response_text = self._generate_with_grok(payload)
+            self._log_grok_output(analysis_id, self.provider, response_text)
             emit(logger, "llm_response_received", stage="llm_request", analysis_run_id=analysis_id,
                  duration_ms=round((time.perf_counter() - llm_started) * 1000),
                  response_chars=len(response_text), response_status="received", response_preview=response_text[:2400])
@@ -245,10 +247,10 @@ class LLMService:
             except Exception as exc:
                 emit(logger, "llm_response_parse_failed", level=logging.ERROR, stage="llm_response_parse",
                      analysis_run_id=analysis_id, exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
-                raise RuntimeError("Gemini returned malformed output: invalid JSON response") from exc
-            gemini_output_diagnostic = self._validate_gemini_output(generated)
-            payload["gemini_output_diagnostic"] = gemini_output_diagnostic
-            if gemini_output_diagnostic["status"] == "partial":
+                raise RuntimeError("Grok returned malformed output: invalid JSON response") from exc
+            grok_output_diagnostic = self._validate_grok_output(generated)
+            payload["grok_output_diagnostic"] = grok_output_diagnostic
+            if grok_output_diagnostic["status"] == "partial":
                 generated = self._complete_partial_output_shape(generated)
             requests = generated.get("investigation_requests", [])
             emit(logger, "llm_response_parsed", stage="llm_response_parse", analysis_run_id=analysis_id,
@@ -291,9 +293,9 @@ class LLMService:
                 normalization_diagnostic["reason_counts"]["invalid_schema_or_unknown_component_path"] = component_removals
             analysis["analysis_evidence"] = payload["analysis_evidence"]
             analysis["analysis_evidence"]["semantic_repository_profile"] = payload.get("semantic_repository_profile", {})
-            effective_gate = payload.get("gemini_coverage_gate") or (context_bundle or {}).get("coverage_gate")
+            effective_gate = payload.get("grok_coverage_gate") or (context_bundle or {}).get("coverage_gate")
             if context_bundle:
-                final_manifest = payload.get("gemini_coverage_manifest") or context_bundle["coverage_manifest"]
+                final_manifest = payload.get("grok_coverage_manifest") or context_bundle["coverage_manifest"]
                 analysis["analysis_evidence"]["coverage_manifest"] = final_manifest
                 analysis["coverage_manifest"] = final_manifest
                 analysis["analysis_evidence"]["context_preparation"] = {
@@ -304,15 +306,15 @@ class LLMService:
                     "coverage_gate": effective_gate,
                     "provider": settings.openrouter_model,
                 }
-            if payload.get("gemini_input_manifest"):
-                analysis["analysis_evidence"]["gemini_input_manifest"] = payload["gemini_input_manifest"]
+            if payload.get("grok_input_manifest"):
+                analysis["analysis_evidence"]["grok_input_manifest"] = payload["grok_input_manifest"]
             analysis["analysis_evidence"]["pipeline_diagnostics"] = {
                 "context_preparation": context_diagnostic,
                 "gemma": {"status": "completed" if context_bundle else "skipped", "code": "ok" if context_bundle else "no_repository_path"},
-                "gemini": {"status": "completed", "code": "ok"},
-                "gemini_output": gemini_output_diagnostic,
+                "grok": {"status": "completed", "code": "ok"},
+                "grok_output": grok_output_diagnostic,
                 "normalization": normalization_diagnostic,
-                "gemini_generation": payload.get("gemini_generation_diagnostic", {"status": "complete"}),
+                "grok_generation": payload.get("grok_generation_diagnostic", {"status": "complete"}),
                 "coverage": effective_gate or {"status": "not_assessed"},
                 "evidence_validation": {"status": "pending_route_validation"},
                 "output_filtering": {"status": "pending_route_filtering"},
@@ -321,7 +323,7 @@ class LLMService:
             coverage = payload.get("investigation_coverage") or {}
             if coverage:
                 payload["analysis_evidence"]["investigation_coverage"] = coverage
-            manifest = (payload.get("gemini_coverage_manifest") or context_bundle.get("coverage_manifest", {})) if context_bundle else {}
+            manifest = (payload.get("grok_coverage_manifest") or context_bundle.get("coverage_manifest", {})) if context_bundle else {}
             classification = classify_analysis_status(
                 analysis,
                 pipeline=analysis["analysis_evidence"]["pipeline_diagnostics"],
@@ -341,8 +343,8 @@ class LLMService:
             failure_stage = (
                 "context_preparation" if failure_code in {"context_preparation_failure", "insufficient_repository_coverage"}
                 else "gemma" if failure_code.startswith("gemma_")
-                else "gemini_output" if failure_code == "gemini_malformed_output"
-                else "gemini"
+                else "grok_output" if failure_code == "grok_malformed_output"
+                else "grok"
             )
             emit(logger, "llm_analysis_failed", level=logging.ERROR, stage="llm_analysis",
                  analysis_run_id=analysis_id, duration_ms=round((time.perf_counter() - started) * 1000),
@@ -361,18 +363,18 @@ class LLMService:
                 "analysis_status": "unavailable" if failure_code == "insufficient_repository_coverage" else "failed",
                 "analysis_error": failure_code,
             }
-            if payload.get("gemini_input_manifest"):
-                analysis["analysis_evidence"]["gemini_input_manifest"] = payload["gemini_input_manifest"]
+            if payload.get("grok_input_manifest"):
+                analysis["analysis_evidence"]["grok_input_manifest"] = payload["grok_input_manifest"]
             if context_bundle:
-                final_manifest = payload.get("gemini_coverage_manifest") or context_bundle["coverage_manifest"]
+                final_manifest = payload.get("grok_coverage_manifest") or context_bundle["coverage_manifest"]
                 analysis["coverage_manifest"] = final_manifest
                 analysis["analysis_evidence"]["coverage_manifest"] = final_manifest
                 analysis["analysis_evidence"]["semantic_repository_profile"] = payload.get("semantic_repository_profile", {})
             analysis["analysis_evidence"]["pipeline_diagnostics"] = {
                 "context_preparation": context_diagnostic,
                 "gemma": {"status": "failed" if failure_stage == "gemma" else "completed" if context_bundle else "not_run", "code": failure_code if failure_stage == "gemma" else "ok" if context_bundle else "not_applicable"},
-                "gemini": {"status": "failed" if failure_stage == "gemini" else "completed" if failure_stage == "gemini_output" else "not_run", "code": failure_code if failure_stage == "gemini" else "ok" if failure_stage == "gemini_output" else "not_applicable"},
-                "gemini_output": {"status": "malformed" if failure_stage == "gemini_output" else "not_received", "code": failure_code},
+                "grok": {"status": "failed" if failure_stage == "grok" else "completed" if failure_stage == "grok_output" else "not_run", "code": failure_code if failure_stage == "grok" else "ok" if failure_stage == "grok_output" else "not_applicable"},
+                "grok_output": {"status": "malformed" if failure_stage == "grok_output" else "not_received", "code": failure_code},
                 "coverage": context_bundle.get("coverage_gate", {"status": "insufficient" if failure_code == "insufficient_repository_coverage" else "unknown"}) if context_bundle else {"status": "insufficient" if failure_code == "insufficient_repository_coverage" else "unknown"},
                 "failure_stage": failure_stage,
                 "failure_code": failure_code,
@@ -390,17 +392,11 @@ class LLMService:
                  status=analysis["analysis_status"], error_code=failure_code)
             return analysis
 
-    def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
-        if self.provider != "gemini":
+    def _generate_with_grok(self, payload: Dict[str, Any]) -> str:
+        if self.provider != "grok":
             raise RuntimeError(f"Unsupported LLM provider: {self.provider}")
-
-        try:
-            import google.generativeai as genai
-        except ImportError as exc:
-            raise RuntimeError("google-generativeai is not installed") from exc
-
-        if not settings.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY is not configured")
+        if not settings.grok_api_key:
+            raise RuntimeError("GROK_API_KEY is not configured")
 
         provider_payload = json.loads(json.dumps(payload))
 
@@ -419,92 +415,74 @@ class LLMService:
 
         instructions = (Path(__file__).parent / "prompts" / "repo_analysis_system.txt").read_text(encoding="utf-8")
 
-        genai.configure(api_key=settings.gemini_api_key)
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=16_384,
-            response_mime_type="application/json",
+        model_name = settings.grok_model
+        request_started = time.perf_counter()
+        input_budget = max(256, int(settings.grok_input_token_budget))
+        # xAI's documented inference endpoints do not provide prompt-only token
+        # counting, so _fit_grok_input uses its conservative local estimate.
+        def count_tokens(_text: str) -> int:
+            raise RuntimeError("Grok token counting endpoint is unavailable")
+
+        provider_payload, prompt, input_manifest = _fit_grok_input(
+            provider_payload, instructions, count_tokens, input_budget
         )
+        payload["grok_input_manifest"] = input_manifest
+        payload["grok_coverage_gate"] = (provider_payload.get("context_bundle") or {}).get("coverage_gate") or provider_payload.get("coverage_gate")
+        if isinstance((provider_payload.get("context_bundle") or {}).get("coverage_manifest"), dict):
+            payload["grok_coverage_manifest"] = provider_payload["context_bundle"]["coverage_manifest"]
+        token_count = input_manifest["estimated_tokens"]
+        emit(logger, "grok_token_count_unavailable", level=logging.WARNING, stage="grok_prepare",
+             analysis_run_id=analysis_id, model=model_name, estimated_tokens=token_count)
+        selected_excerpts = ((provider_payload.get("context_bundle") or {}).get("source_excerpts") or [])
+        selected_chars = sum(len(item.get("content") or "") for item in selected_excerpts if isinstance(item, dict))
+        selected_files = len({item.get("path") for item in selected_excerpts if isinstance(item, dict)})
+        omitted_files = len({item["path"] for item in input_manifest["omitted_source_ranges"] if item.get("path")})
+        emit(logger, "grok_request_prepared", stage="grok_prepare", analysis_run_id=analysis_id,
+             model=model_name, payload_chars=len(prompt), source_chars_selected=selected_chars,
+             selected_file_count=selected_files, excluded_file_count=omitted_files,
+             omitted_field_count=len(input_manifest["omitted_fields"]), input_tokens=token_count,
+             input_budget=input_budget)
+        if token_count > input_budget:
+            raise RuntimeError(f"Grok input exceeds configured token budget ({token_count}>{input_budget})")
+        self._log_grok_input(analysis_id, model_name, prompt)
 
-        errors = []
-        for model_name in (settings.gemini_model,):
-            request_started = time.perf_counter()
-            provider_started = None
-
-            try:
-                model = genai.GenerativeModel(model_name)
-                def count_tokens(text: str) -> int:
-                    result = model.count_tokens(text)
-                    value = getattr(result, "total_tokens", None)
-                    if not isinstance(value, int):
-                        raise ValueError("Gemini token counter returned no token count")
-                    return value
-
-                input_budget = max(256, int(settings.gemini_input_token_budget))
-                provider_payload, prompt, input_manifest = _fit_gemini_input(
-                    provider_payload, instructions, count_tokens, input_budget
-                )
-                payload["gemini_input_manifest"] = input_manifest
-                payload["gemini_coverage_gate"] = (provider_payload.get("context_bundle") or {}).get("coverage_gate") or provider_payload.get("coverage_gate")
-                if isinstance((provider_payload.get("context_bundle") or {}).get("coverage_manifest"), dict):
-                    payload["gemini_coverage_manifest"] = provider_payload["context_bundle"]["coverage_manifest"]
-                token_count = input_manifest["estimated_tokens"]
-                if input_manifest.get("estimated"):
-                    emit(logger, "gemini_token_count_unavailable", level=logging.WARNING, stage="gemini_prepare",
-                         analysis_run_id=analysis_id, model=model_name, estimated_tokens=token_count)
-                if token_count > input_budget:
-                    raise RuntimeError(f"Gemini input exceeds configured token budget ({token_count}>{input_budget})")
-
-                selected_excerpts = ((provider_payload.get("context_bundle") or {}).get("source_excerpts") or [])
-                selected_chars = sum(len(item.get("content") or "") for item in selected_excerpts if isinstance(item, dict))
-                selected_files = len({item.get("path") for item in selected_excerpts if isinstance(item, dict)})
-                omitted_files = len({item.get("path") for item in input_manifest["omitted_source_ranges"]})
-
-                emit(logger, "gemini_request_prepared", stage="gemini_prepare", analysis_run_id=analysis_id,
-                     model=model_name, payload_chars=len(prompt), source_chars_selected=selected_chars,
-                     selected_file_count=selected_files, excluded_file_count=omitted_files,
-                     omitted_field_count=len(input_manifest["omitted_fields"]), input_tokens=token_count,
-                     input_budget=input_budget)
-                self._log_gemini_input(analysis_id, model_name, prompt)
-                provider_started = time.perf_counter()
-                response = model.generate_content(
-                    prompt, generation_config=generation_config
-                )
-                usage = getattr(response, "usage_metadata", None)
-                emit(logger, "gemini_request_completed", stage="gemini_request", analysis_run_id=analysis_id,
-                     model=model_name, status="success", duration_ms=round((time.perf_counter() - provider_started) * 1000),
-                     input_tokens=token_count, prompt_tokens=getattr(usage, "prompt_token_count", None),
-                     output_tokens=getattr(usage, "candidates_token_count", None))
-
-                response_text = getattr(response, "text", "") or ""
-                finish_reason = None
-                try:
-                    finish_reason = response.candidates[0].finish_reason
-                except (AttributeError, IndexError, TypeError):
-                    pass
-                finish_text = str(finish_reason or "").casefold()
-                payload["gemini_generation_diagnostic"] = {
-                    "status": "partial" if "max_tokens" in finish_text or finish_text in {"2", "finishreason.max_tokens"} else "complete",
-                    "finish_reason": finish_text or None,
-                }
-                emit(logger, "gemini_response_metadata", stage="gemini_response", analysis_run_id=analysis_id,
-                     model=model_name, finish_reason=str(finish_reason), response_chars=len(response_text))
-                if not response_text.strip():
-                    raise RuntimeError("Gemini returned an empty response")
-                return response_text
-
-            except Exception as exc:
-                errors.append(f"{model_name}: {exc}")
-                rate_limited = any(term in str(exc).lower() for term in ("429", "rate limit", "resource_exhausted"))
-                emit(logger, "gemini_request_failed", level=logging.WARNING, stage="gemini_request",
-                     analysis_run_id=analysis_id, model=model_name,
-                     duration_ms=round((time.perf_counter() - (provider_started or request_started)) * 1000),
-                     exception_type=type(exc).__name__, reason=str(exc), rate_limited=rate_limited,
-                     retrying=bool(model_name != "gemini-1.5-flash"), exc_info=True)
-                if rate_limited:
-                    emit(logger, "gemini_rate_limited", level=logging.WARNING, stage="gemini_request", analysis_run_id=analysis_id, model=model_name)
-
-        raise RuntimeError("; ".join(errors))
+        system_prompt, separator, user_prompt = prompt.partition("\n\nRepository input:\n")
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": user_prompt if separator else prompt})
+        try:
+            provider_started = time.perf_counter()
+            response = httpx.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.grok_api_key}", "Content-Type": "application/json"},
+                json={"model": model_name, "messages": messages, "temperature": 0.2,
+                      "max_tokens": 16_384, "response_format": {"type": "json_object"}},
+                timeout=max(1, int(settings.provider_timeout_seconds)),
+            )
+            response.raise_for_status()
+            body = response.json()
+            response_text = body["choices"][0]["message"]["content"]
+            finish_reason = body["choices"][0].get("finish_reason")
+            usage = body.get("usage") or {}
+            payload["grok_generation_diagnostic"] = {
+                "status": "partial" if finish_reason in {"length", "max_tokens"} else "complete",
+                "finish_reason": finish_reason,
+            }
+            emit(logger, "grok_request_completed", stage="grok_request", analysis_run_id=analysis_id,
+                 model=model_name, status="success", duration_ms=round((time.perf_counter() - provider_started) * 1000),
+                 input_tokens=token_count, prompt_tokens=usage.get("prompt_tokens"),
+                 output_tokens=usage.get("completion_tokens"))
+            emit(logger, "grok_response_metadata", stage="grok_response", analysis_run_id=analysis_id,
+                 model=model_name, finish_reason=str(finish_reason), response_chars=len(response_text or ""))
+            if not isinstance(response_text, str) or not response_text.strip():
+                raise RuntimeError("Grok returned an empty response")
+            return response_text
+        except Exception as exc:
+            rate_limited = getattr(getattr(exc, "response", None), "status_code", None) == 429 or "429" in str(exc)
+            emit(logger, "grok_request_failed", level=logging.WARNING, stage="grok_request",
+                 analysis_run_id=analysis_id, model=model_name,
+                 duration_ms=round((time.perf_counter() - request_started) * 1000),
+                 exception_type=type(exc).__name__, reason=str(exc), rate_limited=rate_limited, exc_info=True)
+            raise RuntimeError(f"{model_name}: {exc}") from exc
 
     @staticmethod
     def _debug_preview(text: str, limit: int = 12_000) -> str:
@@ -516,19 +494,19 @@ class LLMService:
         )
 
     @staticmethod
-    def _log_gemini_input(analysis_id: str, model_name: str, prompt: str) -> None:
+    def _log_grok_input(analysis_id: str, model_name: str, prompt: str) -> None:
         if not settings.analysis_debug_logging:
             return
         preview_limit = max(
             1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000)
         )
-        emit(logger, "gemini_input_summary", stage="gemini_prepare", analysis_run_id=analysis_id,
+        emit(logger, "grok_input_summary", stage="grok_prepare", analysis_run_id=analysis_id,
              model=model_name, prompt_chars=len(prompt))
-        emit(logger, "gemini_input_debug_preview", level=logging.DEBUG, stage="gemini_prepare",
+        emit(logger, "grok_input_debug_preview", level=logging.DEBUG, stage="grok_prepare",
              analysis_run_id=analysis_id, preview=LLMService._debug_preview(prompt, preview_limit))
 
     @staticmethod
-    def _log_gemini_output(
+    def _log_grok_output(
         analysis_id: str, model_name: str, response_text: str
     ) -> None:
         if not settings.analysis_debug_logging:
@@ -536,9 +514,9 @@ class LLMService:
         preview_limit = max(
             1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000)
         )
-        emit(logger, "gemini_output_summary", stage="gemini_response", analysis_run_id=analysis_id,
+        emit(logger, "grok_output_summary", stage="grok_response", analysis_run_id=analysis_id,
              model=model_name, response_chars=len(str(response_text or "")))
-        emit(logger, "gemini_output_debug_preview", level=logging.DEBUG, stage="gemini_response",
+        emit(logger, "grok_output_debug_preview", level=logging.DEBUG, stage="grok_response",
              analysis_run_id=analysis_id, preview=LLMService._debug_preview(response_text, preview_limit))
 
     @staticmethod
@@ -548,16 +526,16 @@ class LLMService:
             return str(diagnostic_code)
         message = str(exc).lower()
         if any(term in message for term in ("malformed output", "no report content", "valid json", "json object", "empty response")):
-            return "gemini_malformed_output"
+            return "grok_malformed_output"
         if "context token budget" in message:
-            return "gemini_input_token_budget_exceeded"
+            return "grok_input_token_budget_exceeded"
         if "not configured" in message:
-            return "gemini_credentials_not_configured" if "gemini" in message else "gemma_credentials_not_configured"
+            return "grok_credentials_not_configured" if "grok" in message else "gemma_credentials_not_configured"
         if "not installed" in message:
-            return "gemini_dependency_missing"
+            return "grok_dependency_missing"
         if "token budget" in message:
-            return "gemini_input_token_budget_exceeded"
-        return "gemini_provider_failure"
+            return "grok_input_token_budget_exceeded"
+        return "grok_provider_failure"
 
     @staticmethod
     def _log_analysis_sections(
@@ -634,7 +612,7 @@ class LLMService:
             "detected_technology_stack": stack,
             "repository_structure": self._trim_structure(repository_structure),
             # This preview supports post-generation evidence-path normalization.
-            # The Gemini request uses Gemma's manifest as the complete inventory.
+            # The final Grok request uses Gemma's manifest as the complete inventory.
             "file_tree": scan.get("files", [])[:500],
             "inventory_file_count": len(scan.get("files", [])),
             "code_signals": code_signals,
@@ -824,11 +802,11 @@ class LLMService:
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
             if not match:
-                raise ValueError("Gemini response did not contain a valid JSON object")
+                raise ValueError("Grok response did not contain a valid JSON object")
             parsed = json.loads(match.group(0))
 
         if not isinstance(parsed, dict):
-            raise ValueError("Gemini response must be a JSON object")
+            raise ValueError("Grok response must be a JSON object")
         return parsed
 
     @staticmethod
@@ -871,14 +849,14 @@ class LLMService:
     ) -> Dict[str, Any]:
         overview = str(analysis.get("overview") or "").strip()
         if not overview:
-            raise ValueError("Gemini response missing overview")
+            raise ValueError("Grok response missing overview")
 
         modules = analysis.get("modules")
         architecture = analysis.get("architecture")
         if not isinstance(modules, list):
-            raise ValueError("Gemini response missing modules")
+            raise ValueError("Grok response missing modules")
         if not isinstance(architecture, dict):
-            raise ValueError("Gemini response missing architecture")
+            raise ValueError("Grok response missing architecture")
 
         executive = self._normalize_executive_overview(
             analysis.get("executive_overview"), payload
@@ -906,7 +884,7 @@ class LLMService:
         if isinstance(payload.get("context_bundle"), dict):
             raw_paths = [
                 item.get("path") for item in bundle_files
-                if isinstance(item, dict) and item.get("path") and item.get("gemini_supplied_line_ranges")
+                if isinstance(item, dict) and item.get("path") and item.get("grok_supplied_line_ranges")
             ]
         else:
             raw_paths = list(payload.get("file_tree", [])) + evidence_paths
@@ -1130,7 +1108,7 @@ class LLMService:
                 known_repo_paths.update(
                     self._normalize_evidence_path(item.get("path"))
                     for item in manifest.get("files", [])
-                    if isinstance(item, dict) and item.get("path") and item.get("gemini_supplied_line_ranges")
+                    if isinstance(item, dict) and item.get("path") and item.get("grok_supplied_line_ranges")
                 )
             else:
                 known_repo_paths.update(
@@ -1452,7 +1430,7 @@ class LLMService:
             for entry in manifest.get("files", []):
                 if not isinstance(entry, dict) or entry.get("status") not in {"fully_inspected", "partially_inspected"}:
                     continue
-                if entry.get("gemini_supplied_line_ranges"):
+                if entry.get("grok_supplied_line_ranges"):
                     path = self._normalize_evidence_path(entry.get("path"))
                     if path:
                         evidence_paths.add(path.casefold())

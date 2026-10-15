@@ -383,13 +383,13 @@ export function getOrCreateRepository(input: string): Repository {
     devopsMods = ["Docker Compose Deployments", "Vercel Build Hooks"];
     archDescription = "The application processes binary multi-part file uploads directly from client browsers through secure Cloudflare tunnels into isolated Node streaming pipelines before storing files in AWS S3 with PostgreSQL handling access metadata.";
   } else if (cleanInput.includes("bot") || cleanInput.includes("ai") || cleanInput.includes("chat") || cleanInput.includes("model")) {
-    topicMatches = ["ai-chat", "llm-wrapper", "gemini-api", "vector-db", "prompt-engineering"];
+    topicMatches = ["ai-chat", "llm-wrapper", "grok-api", "vector-db", "prompt-engineering"];
     frontendMods = ["React Functional Components", "Tailwind Prose", "Audio Speech WebAPI"];
-    backendMods = ["Express API Server", "Python FastAPI", "@google/genai SDK Integration"];
+    backendMods = ["Express API Server", "Python FastAPI", "Grok API Integration"];
     databaseMods = ["pgvector Database", "Pinecone Cloud DB"];
     infraMods = ["Google Cloud Platform VM", "Vercel Serverless Functions"];
-    devopsMods = ["GitHub CI/CD Automation", "Docker Core Engine", "Gemini Middleware Config"];
-    archDescription = "Users pass prompt queries into a high-fidelity React frontend. The request is processed on the backend through a secure @google/genai SDK wrapper, utilizing pgvector storage to read/write context embedding states.";
+    devopsMods = ["GitHub CI/CD Automation", "Docker Core Engine", "Grok Middleware Config"];
+    archDescription = "Users pass prompt queries into a high-fidelity React frontend. The request is processed by a backend Grok API integration, utilizing pgvector storage to read and write context embeddings.";
   } else if (cleanInput.includes("kube") || cleanInput.includes("docker") || cleanInput.includes("ops") || cleanInput.includes("infra")) {
     topicMatches = ["devops", "cloud-orchestration", "kubernetes-dashboard", "helm", "yaml-compiler"];
     frontendMods = ["React Terminal Slate", "Recharts Visualizers", "WebSockets Logs"];

@@ -635,7 +635,7 @@ export async function analyzeRepository(
       result.architecture?.components?.length || hasReportSections
     );
     const pipelineDiagnostics = (result.analysis_evidence?.pipeline_diagnostics || {}) as Record<string, any>;
-    const requiredStageFailed = ['context_preparation', 'gemma', 'gemini', 'gemini_output'].some(stage =>
+    const requiredStageFailed = ['context_preparation', 'gemma', 'grok', 'grok_output'].some(stage =>
       ['failed', 'malformed'].includes(pipelineDiagnostics[stage]?.status)
     ) || /(?:provider_failure|context_preparation_failure|malformed_output)/i.test(result.error_code || '');
     const missingValidationMetadata = !result.repository_model || !commitSha;

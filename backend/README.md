@@ -47,7 +47,7 @@ backend/
 
 `app/main.py` creates the FastAPI app, registers route modules, and exposes `/health`.
 
-`app/config.py` loads environment variables for PostgreSQL, GitHub, OpenAI/Gemini, local clone storage, and future async job mode.
+`app/config.py` loads environment variables for PostgreSQL, GitHub, OpenAI/Grok, local clone storage, and future async job mode.
 
 `app/database.py` owns the SQLAlchemy engine, base model, and request-scoped database session dependency.
 
@@ -63,7 +63,7 @@ backend/
 
 `app/services/stack_detector.py` detects frontend, backend, database, and infrastructure stack from files and dependency manifests.
 
-`app/services/llm_service.py` generates repository overviews, user workflows, evidence-backed feature cards, module breakdowns, and architecture summaries with Gemini. It grounds the analysis in README content and selected source evidence, rejects unsupported feature references and folder names, and uses README-derived summaries and features when Gemini is unavailable.
+`app/services/llm_service.py` generates repository overviews, user workflows, evidence-backed feature cards, module breakdowns, and architecture summaries with Grok. It grounds the analysis in README content and selected source evidence, rejects unsupported feature references and folder names, and uses README-derived summaries and features when Grok is unavailable.
 
 `app/services/similar_repo_service.py` recommends similar repositories using GitHub search based on repository name, language, and detected stack.
 

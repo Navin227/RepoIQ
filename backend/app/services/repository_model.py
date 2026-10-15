@@ -527,12 +527,12 @@ def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commi
             if coverage_manifest is not None and manifest_entry is None:
                 evidence_issues.append(f"{path}: path_not_in_manifest")
                 continue
-            if manifest_entry is not None and "gemini_supplied_line_ranges" in manifest_entry and not manifest_entry.get("gemini_supplied_line_ranges"):
+            if manifest_entry is not None and "grok_supplied_line_ranges" in manifest_entry and not manifest_entry.get("grok_supplied_line_ranges"):
                 evidence_issues.append(f"{path}: partial_source_coverage")
                 continue
             try:
                 manifest_entry = manifest_entry or {}
-                ranges = manifest_entry.get("gemini_supplied_line_ranges") or []
+                ranges = manifest_entry.get("grok_supplied_line_ranges") or []
                 bounds = ranges[0] if ranges and isinstance(ranges[0], dict) else {}
                 start, end = bounds.get("start_line"), bounds.get("end_line")
                 source = retrieval.read(path, start or 1, end)

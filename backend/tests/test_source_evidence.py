@@ -1,5 +1,4 @@
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -197,7 +196,7 @@ def test_manifest_framework_config_and_source_are_selected_without_readme(tmp_pa
     )
 
 
-def test_selected_source_reaches_actual_gemini_request_serialization(tmp_path, monkeypatch, caplog):
+def test_selected_source_reaches_actual_grok_request_serialization(tmp_path, monkeypatch, caplog):
     source_marker = "persist_invoice_and_publish_billing_event"
     _write(
         tmp_path,
@@ -226,24 +225,18 @@ def test_selected_source_reaches_actual_gemini_request_serialization(tmp_path, m
 
     captured = {}
 
-    class FakeModel:
-        def count_tokens(self, prompt):
-            captured["token_count_prompt"] = prompt
-            return SimpleNamespace(total_tokens=1200)
+    def fake_post(url, *, headers, json, timeout):
+        captured["provider_prompt"] = json["messages"][1]["content"]
+        assert headers["Authorization"] == "Bearer test-key"
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"choices": [{"message": {"content": '{"result":"ok"}'}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 30}},
+        )
 
-        def generate_content(self, prompt, generation_config):
-            captured["provider_prompt"] = prompt
-            return SimpleNamespace(text='{"result":"ok"}')
+    monkeypatch.setattr("app.services.llm_service.httpx.post", fake_post)
+    monkeypatch.setattr("app.services.llm_service.settings.grok_api_key", "test-key")
 
-    fake_genai = SimpleNamespace(
-        configure=lambda **kwargs: None,
-        types=SimpleNamespace(GenerationConfig=lambda **kwargs: kwargs),
-        GenerativeModel=lambda model_name: FakeModel(),
-    )
-    monkeypatch.setitem(sys.modules, "google.generativeai", fake_genai)
-    monkeypatch.setattr("app.services.llm_service.settings.gemini_api_key", "test-key")
-
-    assert LLMService()._generate_with_gemini(payload) == '{"result":"ok"}'
+    assert LLMService()._generate_with_grok(payload) == '{"result":"ok"}'
     request = captured["provider_prompt"]
     assert source_marker in request
     assert "ghp_abcdefghijklmnopqrstuvwxyz" not in request
@@ -274,30 +267,30 @@ def test_token_budget_omits_low_priority_source_before_business_routes(tmp_path,
     )
     captured = {}
 
-    class FakeModel:
-        def count_tokens(self, prompt):
-            return SimpleNamespace(
-                total_tokens=120_000 if "LOW_PRIORITY_MARKER" in prompt else 1000
-            )
+    monkeypatch.setattr("app.services.llm_service.settings.grok_input_token_budget", 5_000)
+    # Large low-priority content forces budget fitting while preserving the route excerpt.
+    payload["context_bundle"] = {"source_excerpts": [
+        {"path": "src/services/low_priority.py", "start_line": 1, "end_line": 1, "content": "LOW_PRIORITY_MARKER " + ("x" * 9_500)},
+        {"path": "src/routes/orders.py", "start_line": 1, "end_line": 1, "content": "HIGH_VALUE_BODY"},
+    ], "coverage_manifest": {"files": [
+        {"path": "src/services/low_priority.py", "roles": [], "execution_path_distance": 9},
+        {"path": "src/routes/orders.py", "roles": ["entry_point"], "important_to_execution_path": True, "execution_path_distance": 0},
+    ]}}
 
-        def generate_content(self, prompt, generation_config):
-            captured["prompt"] = prompt
-            return SimpleNamespace(text='{"result":"ok"}')
+    def fake_post(url, *, headers, json, timeout):
+        captured["prompt"] = json["messages"][1]["content"]
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"choices": [{"message": {"content": '{"result":"ok"}'}, "finish_reason": "stop"}]})
 
-    fake_genai = SimpleNamespace(
-        configure=lambda **kwargs: None,
-        types=SimpleNamespace(GenerationConfig=lambda **kwargs: kwargs),
-        GenerativeModel=lambda model_name: FakeModel(),
-    )
-    monkeypatch.setitem(sys.modules, "google.generativeai", fake_genai)
-    monkeypatch.setattr("app.services.llm_service.settings.gemini_api_key", "test-key")
+    monkeypatch.setattr("app.services.llm_service.httpx.post", fake_post)
+    monkeypatch.setattr("app.services.llm_service.settings.grok_api_key", "test-key")
 
-    LLMService()._generate_with_gemini(payload)
+    LLMService()._generate_with_grok(payload)
 
     request = captured["prompt"]
     assert "LOW_PRIORITY_MARKER" not in request
     assert "HIGH_VALUE_BODY" in request
-    assert "Gemini input token budget" in request
+    assert "Grok input token budget" in request
     assert "src/services/low_priority.py" in request
 
 

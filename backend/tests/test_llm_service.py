@@ -11,8 +11,8 @@ from app.services import analysis_context
 from app.services.similar_repo_service import SimilarRepoService
 
 
-def test_llm_service_parses_structured_gemini_json(monkeypatch):
-    def fake_gemini(self, payload):
+def test_llm_service_parses_structured_grok_json(monkeypatch):
+    def fake_grok(self, payload):
         return """
         {
           "overview": "A file processing platform for authenticated users.",
@@ -58,7 +58,7 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
         }
         """
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
 
     analysis = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/files", "description": "File tools"},
@@ -93,11 +93,11 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
     assert analysis["architecture"]["flow"] == ["User", "Frontend", "API Layer", "Worker", "Storage"]
 
 
-def test_llm_service_reports_gemini_provider_failure_without_successful_analysis(monkeypatch):
-    def failing_gemini(self, payload):
+def test_llm_service_reports_grok_provider_failure_without_successful_analysis(monkeypatch):
+    def failing_grok(self, payload):
         raise RuntimeError("quota exceeded")
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", failing_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", failing_grok)
 
     analysis = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/files", "description": "File tools"},
@@ -122,15 +122,15 @@ def test_llm_service_reports_gemini_provider_failure_without_successful_analysis
 
     assert analysis["overview"] == ""
     assert analysis["analysis_status"] == "failed"
-    assert analysis["analysis_error"] == "gemini_provider_failure"
-    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "failed"
+    assert analysis["analysis_error"] == "grok_provider_failure"
+    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["grok"]["status"] == "failed"
     assert analysis["modules"] == []
     assert analysis["executive_overview"] is None
     assert {"summary", "flow"} <= set(analysis["architecture"])
 
 
-def test_gemini_modules_without_repository_evidence_are_not_returned(monkeypatch):
-    def fake_gemini(self, payload):
+def test_grok_modules_without_repository_evidence_are_not_returned(monkeypatch):
+    def fake_grok(self, payload):
         return """
         {
           "overview": "An unsupported description.",
@@ -145,7 +145,7 @@ def test_gemini_modules_without_repository_evidence_are_not_returned(monkeypatch
         }
         """
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
     analysis = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/example"},
         readme="",
@@ -172,7 +172,7 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     caplog.set_level(logging.DEBUG)
     def fake_analysis(self, metadata, readme, stack, repository_structure, scan):
         return {
-            "overview": "GoFile executive overview from Gemini.",
+            "overview": "GoFile executive overview from Grok.",
             "modules": [
                 {"name": "Frontend", "description": "React application."},
                 {"name": "API Layer", "description": "API Gateway integration."},
@@ -219,7 +219,7 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     assert '"event":"repository_model_build_completed"' in caplog.text
     assert '"event":"response_schema_validated"' in caplog.text
     assert '"analysis_run_id":"run_gofile_test"' in caplog.text
-    assert body["overview"] == "GoFile executive overview from Gemini."
+    assert body["overview"] == "GoFile executive overview from Grok."
     assert body["modules"][0]["name"] == "Frontend"
     assert "API Gateway" in body["architecture_summary"]
     assert "stack" in body
@@ -284,10 +284,10 @@ def test_repo_scanner_keeps_relevant_files_when_inventory_is_large(tmp_path):
 
 
 def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
-    def fake_gemini(self, payload):
+    def fake_grok(self, payload):
         return '{"overview":"Deployment automation for release teams.","executive_overview":{"what_is_this_project":["This project helps teams ship updates."],"why_was_it_built":"It reduces release friction.","user_features":[{"name":"Deploy changes","description":"Ship code consistently."}],"typical_use_cases":["A team releases software"],"who_is_this_for":["Engineering teams"],"why_is_it_valuable":"It saves time.","one_line_summary":"Deployment automation for product teams."},"modules":[],"architecture":{"summary":"Single service architecture","flow":["User","Frontend","API"]}}'
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
     monkeypatch.setattr('app.services.llm_service.settings.analysis_debug_logging', True, raising=False)
     caplog.set_level(logging.DEBUG)
 
@@ -300,12 +300,12 @@ def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
     )
 
     assert analysis["executive_overview"]["what_is_this_project"][0].startswith("This project")
-    assert '"event":"gemini_input_summary"' in caplog.text
-    assert '"event":"gemini_input_debug_preview"' in caplog.text
+    assert '"event":"grok_input_summary"' in caplog.text
+    assert '"event":"grok_input_debug_preview"' in caplog.text
 
 
 def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
-    def fake_gemini(self, payload):
+    def fake_grok(self, payload):
         return '''
         {
           "overview": "A file processing platform for authenticated users.",
@@ -333,7 +333,7 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
         }
         '''
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
 
     analysis = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/files", "description": "File tools"},
@@ -349,18 +349,18 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
     )
 
     assert analysis["analysis_status"] == "complete"
-    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini_output"]["missing_fields"]
+    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["grok_output"]["missing_fields"]
     assert analysis["ai_insights"] == []
 
 
 def test_optional_unresolved_investigation_does_not_hide_useful_output(monkeypatch):
     captured = {}
 
-    def fake_gemini(self, payload):
+    def fake_grok(self, payload):
         captured["analysis_run_id"] = payload["analysis_run_id"]
         return '{"overview":"Evidence-backed report.","modules":[],"architecture":{"summary":"Requests enter the API and are handled by the service layer."},"investigation_requests":[{"query":"BillingService","question":"confirm billing workflow"}]}'
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
     result = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/example", "analysis_run_id": "run_partial_789"},
         readme="", stack={}, repository_structure=[], scan={"files": [], "source_evidence": {}},
@@ -451,7 +451,7 @@ def test_duplicate_features_are_deduplicated_by_name():
     assert [feature["name"] for feature in normalized["user_features"]] == ["Upload files"]
 
 
-def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(monkeypatch, tmp_path):
+def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_grok_call(monkeypatch, tmp_path):
     (tmp_path / "main.py").write_text("from service import run\nif __name__ == '__main__': run()\n", encoding="utf-8")
     (tmp_path / "service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
     monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
@@ -462,14 +462,14 @@ def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(mo
     monkeypatch.setattr(analysis_context, "_chat", fake_gemma)
     captured = {}
 
-    def fake_gemini(self, payload):
+    def fake_grok(self, payload):
         captured.update(payload)
         return json.dumps({
             "overview": "A verified Python application.", "executive_overview": {}, "claims": [], "modules": [],
             "architecture": {}, "report_sections": {"recommendations": [], "limitations": []}, "investigation_requests": [],
         })
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    monkeypatch.setattr(LLMService, "_generate_with_grok", fake_grok)
     result = LLMService().generate_repository_analysis(
         metadata={"full_name": "owner/project", "analysis_run_id": "run_context_handoff", "commit_sha": "abc"},
         readme="", stack={}, repository_structure=[], scan={"files": ["main.py", "service.py"], "dependencies": {}, "source_evidence": {}}, repo_path=tmp_path,
@@ -482,7 +482,7 @@ def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(mo
     assert "deterministic_context" not in captured["context_bundle"]
     assert "coverage_manifest" not in captured
     assert result["analysis_evidence"]["pipeline_diagnostics"]["gemma"]["status"] == "completed"
-    assert result["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "completed"
+    assert result["analysis_evidence"]["pipeline_diagnostics"]["grok"]["status"] == "completed"
     assert result["analysis_evidence"]["context_preparation"]["status"] == "complete"
     assert result["analysis_status"] == "partial"
 
@@ -490,12 +490,12 @@ def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(mo
 def test_modules_exclude_artifacts_and_only_report_import_verified_connections():
     service = LLMService()
     files = [
-        {"path": "src/api.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/orders.py"]},
-        {"path": "src/orders.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/store.py"]},
-        {"path": "src/store.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": []},
-        {"path": "package-lock.json", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
-        {"path": "node_modules/lib/index.js", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
-        {"path": "infra/api-gateway.tf", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+        {"path": "src/api.py", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/orders.py"]},
+        {"path": "src/orders.py", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/store.py"]},
+        {"path": "src/store.py", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": []},
+        {"path": "package-lock.json", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+        {"path": "node_modules/lib/index.js", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+        {"path": "infra/api-gateway.tf", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
     ]
     normalized = service._normalize_analysis({
         "overview": "An order API with persistence.",
@@ -540,7 +540,7 @@ def test_end_user_use_cases_are_titled_evidence_backed_and_deduplicated():
     }]
 
 
-def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():
+def test_grok_input_budget_records_omissions_and_removes_duplicate_tree():
     bundle = {
         "coverage_manifest": {"files": [
             {"path": "main.py", "roles": ["entry_point"], "important_to_execution_path": True, "execution_path_distance": 0},
@@ -553,25 +553,25 @@ def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():
         ],
         "repository_map": {"purpose": "prepared"},
     }
-    provider, prompt, manifest = llm_service_module._fit_gemini_input(
+    provider, prompt, manifest = llm_service_module._fit_grok_input(
         {"file_tree": ["main.py", "docs/example.py"], "context_bundle": bundle, "analysis_evidence": {"counts": {"files": 2}}},
         "system prompt", lambda text: (len(text) + 1) // 2, 2200,
     )
     assert manifest["estimated_tokens"] <= manifest["budget_tokens"]
     assert manifest["omitted_source_ranges"]
-    assert all(item["reason"] == "gemini_input_token_budget" for item in manifest["omitted_source_ranges"])
+    assert all(item["reason"] == "grok_input_token_budget" for item in manifest["omitted_source_ranges"])
     assert any(item["path"] == "main.py" for item in provider["context_bundle"]["source_excerpts"])
     assert "file_tree" not in provider
     assert {item["field"] for item in manifest["omitted_fields"]} >= {"file_tree"}
-    assert "gemini_input_manifest" in prompt
+    assert "grok_input_manifest" in prompt
 
 
-def test_gemma_failure_is_not_hidden_by_a_gemini_fallback(monkeypatch, tmp_path):
+def test_gemma_failure_is_not_hidden_by_a_grok_fallback(monkeypatch, tmp_path):
     (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
     monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
     monkeypatch.setattr(analysis_context, "_chat", lambda *args: (_ for _ in ()).throw(RuntimeError("provider unavailable")))
-    gemini_calls = []
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: gemini_calls.append(True) or "{}")
+    grok_calls = []
+    monkeypatch.setattr(LLMService, "_generate_with_grok", lambda *args: grok_calls.append(True) or "{}")
     result = LLMService().generate_repository_analysis(
         metadata={"full_name": "owner/repo", "commit_sha": "abc"}, readme="", stack={},
         repository_structure=[], scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
@@ -580,36 +580,36 @@ def test_gemma_failure_is_not_hidden_by_a_gemini_fallback(monkeypatch, tmp_path)
     assert result["analysis_status"] == "failed"
     assert result["analysis_error"] == "gemma_provider_failure"
     assert diagnostics["gemma"]["status"] == "failed"
-    assert diagnostics["gemini"]["status"] == "not_run"
-    assert not gemini_calls
+    assert diagnostics["grok"]["status"] == "not_run"
+    assert not grok_calls
 
 
-def test_malformed_and_partial_gemini_outputs_are_distinguished(monkeypatch):
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: "{}")
+def test_malformed_and_partial_grok_outputs_are_distinguished(monkeypatch):
+    monkeypatch.setattr(LLMService, "_generate_with_grok", lambda *args: "{}")
     malformed = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
     assert malformed["analysis_status"] == "failed"
-    assert malformed["analysis_error"] == "gemini_malformed_output"
-    assert malformed["analysis_evidence"]["pipeline_diagnostics"]["failure_stage"] == "gemini_output"
+    assert malformed["analysis_error"] == "grok_malformed_output"
+    assert malformed["analysis_evidence"]["pipeline_diagnostics"]["failure_stage"] == "grok_output"
 
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: '{"overview":"Partial report"}')
+    monkeypatch.setattr(LLMService, "_generate_with_grok", lambda *args: '{"overview":"Partial report"}')
     partial = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
     assert partial["analysis_status"] == "partial"
-    assert partial["analysis_evidence"]["pipeline_diagnostics"]["gemini_output"]["status"] == "partial"
+    assert partial["analysis_evidence"]["pipeline_diagnostics"]["grok_output"]["status"] == "partial"
 
 
-def test_insufficient_gemma_coverage_is_reported_and_blocks_gemini(monkeypatch, tmp_path):
+def test_insufficient_gemma_coverage_is_reported_and_blocks_grok(monkeypatch, tmp_path):
     (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
     monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
     monkeypatch.setattr(analysis_context.settings, "context_per_file_token_budget", 128)
-    gemini_calls = []
-    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: gemini_calls.append(True) or "{}")
+    grok_calls = []
+    monkeypatch.setattr(LLMService, "_generate_with_grok", lambda *args: grok_calls.append(True) or "{}")
     result = LLMService().generate_repository_analysis(
         metadata={"full_name": "owner/repo"}, readme="", stack={}, repository_structure=[],
         scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
     )
     assert result["analysis_error"] == "insufficient_repository_coverage"
     assert result["analysis_evidence"]["pipeline_diagnostics"]["coverage"]["status"] == "insufficient"
-    assert not gemini_calls
+    assert not grok_calls
 
 
 def test_malformed_gemma_response_has_a_distinct_stage_diagnostic(monkeypatch, tmp_path):
@@ -623,4 +623,4 @@ def test_malformed_gemma_response_has_a_distinct_stage_diagnostic(monkeypatch, t
     diagnostics = result["analysis_evidence"]["pipeline_diagnostics"]
     assert result["analysis_error"] == "gemma_malformed_output"
     assert diagnostics["failure_stage"] == "gemma"
-    assert diagnostics["gemini"]["status"] == "not_run"
+    assert diagnostics["grok"]["status"] == "not_run"
