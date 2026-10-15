@@ -428,7 +428,9 @@ export default function App() {
    */
   const demoApiUrl =
     demoStatus?.application_url?.trim() || null;
-  // API availability is independent of the EC2/K3s demo lifecycle.
+  // TEMPORARY: analysis/search do not wait for EC2/K3s readiness while the
+  // backend path is being inspected. Restore the readiness gate after recovery.
+  // The API endpoint itself remains required to produce repository evidence.
   const analysisApiAvailable = Boolean(
     getDevelopmentApiBaseOverride() ||
     import.meta.env.VITE_API_BASE_URL?.trim() ||
@@ -505,6 +507,27 @@ export default function App() {
     const analysisLog = (event: string, fields: Record<string, unknown> = {}) =>
       console.info('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event, ...fields });
     analysisLog('analyze_button_clicked', { repository_url: repoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
+    const fullName = getRepoFullName(repoUrl);
+    const [owner = '', name = ''] = fullName.split('/');
+    setAnalyzedRepo({
+      owner,
+      name,
+      fullName,
+      url: repoUrl,
+      description: '',
+      overview: { aiSummary: '' },
+      analysis: {
+        projectSummary: '',
+        techStack: { frontend: [], backend: [], database: [], infrastructure: [], devops: [] },
+        keyFeatures: [],
+        businessModules: [],
+      },
+      folderStructure: [],
+      similarRepos: [],
+      analysisStatus: 'running',
+      analysisRunId,
+    });
+    setCurrentTab('analyze');
     setAnalyzingRepoUrl(repoUrl);
 
     setAnalyzeMessageByUrl(prev => ({
@@ -641,6 +664,9 @@ export default function App() {
         setCurrentTab('analyze');
       } else {
         analysisLog('frontend_analysis_failed', { error: result.error || 'Analysis failed' });
+        setAnalyzedRepo(current => current?.analysisRunId === analysisRunId
+          ? { ...current, analysisStatus: 'error', analysisError: result.error || 'Analysis failed.' }
+          : current);
         setAnalyzeMessageByUrl(prev => ({
           ...prev,
           [repoUrl]:
@@ -651,6 +677,9 @@ export default function App() {
     } catch (error) {
       console.error('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event: 'frontend_analysis_exception',
         error_type: error instanceof Error ? error.name : 'UnknownError' });
+      setAnalyzedRepo(current => current?.analysisRunId === analysisRunId
+        ? { ...current, analysisStatus: 'error', analysisError: 'The analysis request failed before a result was received.' }
+        : current);
       setAnalyzeMessageByUrl(prev => ({
         ...prev,
         [repoUrl]: 'RepoIQ analyze request failed.',

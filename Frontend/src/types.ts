@@ -76,6 +76,7 @@ export interface Repository {
   architecture?: ArchitectureAnalysis;
   analysisEvidence?: Record<string, unknown>;
   analysisStatus?: string;
+  analysisError?: string;
   commitSha?: string;
   repositoryModel?: Record<string, unknown>;
   analysisRunId?: string;

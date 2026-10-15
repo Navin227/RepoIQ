@@ -292,7 +292,13 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
       event: 'frontend_result_rendered',
       repository: repo.fullName,
       commit_sha: repo.commitSha,
-      final_state: repo.analysisStatus === 'partial' || repo.analysisStatus === 'degraded' ? repo.analysisStatus : 'success',
+      final_state: repo.analysisStatus === 'running'
+        ? 'in_progress'
+        : repo.analysisStatus === 'error'
+          ? 'failure'
+          : repo.analysisStatus === 'partial' || repo.analysisStatus === 'degraded'
+            ? repo.analysisStatus
+            : 'success',
       module_count: repo.analysis.businessModules?.length || 0,
       feature_count: repo.analysis.keyFeatures.length,
     });
@@ -539,6 +545,28 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
           </button>
         </div>
       </div>
+
+      {(repo.analysisStatus === 'running' || repo.analysisStatus === 'error') && (
+        <div
+          role={repo.analysisStatus === 'error' ? 'alert' : 'status'}
+          className={`mb-6 rounded-xl border px-4 py-3 text-sm ${repo.analysisStatus === 'error'
+            ? 'border-red-400/20 bg-red-500/10 text-red-200'
+            : 'border-purple-400/20 bg-purple-500/10 text-purple-200'
+          }`}
+        >
+          <p className="font-semibold">
+            {repo.analysisStatus === 'running' ? 'Analysis in progress' : 'Analysis could not be completed'}
+          </p>
+          <p className="mt-1 text-current/80">
+            {repo.analysisStatus === 'running'
+              ? 'Connecting to the configured analysis API and retrieving repository evidence.'
+              : repo.analysisError || 'The configured analysis API did not return a result.'}
+          </p>
+          {repo.analysisRunId && (
+            <p className="mt-1 font-mono text-xs opacity-75">Correlation ID: {repo.analysisRunId}</p>
+          )}
+        </div>
+      )}
 
       {/* Mode Perspective Selector (Overview vs Modules vs Technical Deep-Dive) */}
       <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-8 bg-white/[0.01] border border-white/[0.05] p-3 rounded-2xl">

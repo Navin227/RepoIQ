@@ -5,6 +5,16 @@ Windows machine. It does not change the Amplify build setting, AWS resources,
 the EC2 instance, or K3s. The machine running the backend and tunnel must stay
 online while you test.
 
+During this inspection period, Analyze navigates to the repository analysis
+view immediately, and search/analysis are not gated on EC2/K3s readiness. The
+analysis view shows a running state, then a result or an explicit error with
+its correlation ID. The backend API is still required to retrieve evidence;
+this change does not fabricate an analysis when the endpoint is unavailable.
+After the backend issue is resolved, restore the infrastructure readiness gate
+in `Frontend/src/App.tsx` where the temporary bypass is marked, and change the
+three component `apiAvailable` props back to the intended readiness condition
+if product behavior should again require the demo server to be online.
+
 ## 1. Start the backend locally
 
 Open PowerShell in the repository root. Use a separate SQLite database and
