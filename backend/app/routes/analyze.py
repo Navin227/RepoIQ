@@ -255,6 +255,41 @@ def _filter_executive_overview(executive: Any, valid_features: set) -> dict:
     return result
 
 
+def _narrative_supported_by_claims(text: Any, claims: list) -> bool:
+    """Reject generic narrative unless validated overview claims support it."""
+    stop_words = {
+        "the", "and", "for", "with", "from", "into", "this", "that", "are",
+        "was", "were", "can", "will", "its", "their", "users", "user",
+        "project", "repository", "files", "file", "documented", "purpose",
+        "visible", "structure", "usable", "product", "tool", "intended",
+        "main", "application", "experience", "supporting", "areas", "included",
+        "operational", "setup", "available", "evidence", "together", "brings",
+        "interact", "rely", "maintain", "run", "built", "designed", "provides",
+        "supports", "offers", "helps", "allows", "enables", "use", "using",
+    }
+
+    def tokens(value: Any) -> set[str]:
+        if not isinstance(value, str):
+            return set()
+        return {
+            token for token in re.findall(r"[a-z0-9_+#.-]{3,}", value.casefold())
+            if token not in stop_words
+        }
+
+    narrative_tokens = tokens(text)
+    if len(narrative_tokens) < 2:
+        return False
+    claim_tokens = set().union(*(
+        tokens(claim.text)
+        for claim in claims
+        if _claim_is_usable(claim)
+        and str(getattr(claim, "category", "") or "").casefold()
+        in {"overview", "executive_summary"}
+    )) if claims else set()
+    shared = narrative_tokens & claim_tokens
+    return len(shared) >= 2 and len(shared) / len(narrative_tokens) >= 0.3
+
+
 @router.post("", response_model=AnalyzeResponse)
 def analyze_repository(
     payload: AnalyzeRequest,
@@ -664,16 +699,47 @@ def _run_analysis(
             )
             ai_analysis["executive_overview"] = executive
 
-            if not any(
-                claim.category in {"overview", "executive_summary"}
+            valid_overview_claims = [
+                claim for claim in repository_model.claims
+                if claim.category in {"overview", "executive_summary"}
                 and claim.state in {"confirmed", "inferred"}
-                for claim in repository_model.claims
-            ):
+            ]
+            if not valid_overview_claims:
                 ai_analysis["overview"] = ""
                 executive["what_is_this_project"] = []
                 executive["why_was_it_built"] = UNKNOWN_EVIDENCE_MESSAGE
                 executive["why_is_it_valuable"] = UNKNOWN_EVIDENCE_MESSAGE
                 executive["one_line_summary"] = UNKNOWN_EVIDENCE_MESSAGE
+                executive["typical_use_cases"] = []
+                executive["who_is_this_for"] = []
+            else:
+                ai_analysis["overview"] = (
+                    ai_analysis.get("overview", "")
+                    if _narrative_supported_by_claims(
+                        ai_analysis.get("overview", ""), valid_overview_claims
+                    )
+                    else ""
+                )
+                executive["what_is_this_project"] = [
+                    item for item in _as_list(
+                        executive.get("what_is_this_project")
+                    )
+                    if _narrative_supported_by_claims(item, valid_overview_claims)
+                ]
+                for field in (
+                    "why_was_it_built", "why_is_it_valuable", "one_line_summary"
+                ):
+                    value = executive.get(field)
+                    if not _narrative_supported_by_claims(value, valid_overview_claims):
+                        executive[field] = UNKNOWN_EVIDENCE_MESSAGE
+                executive["typical_use_cases"] = [
+                    item for item in _as_list(executive.get("typical_use_cases"))
+                    if _narrative_supported_by_claims(item, valid_overview_claims)
+                ]
+                executive["who_is_this_for"] = [
+                    item for item in _as_list(executive.get("who_is_this_for"))
+                    if _narrative_supported_by_claims(item, valid_overview_claims)
+                ]
 
             ai_analysis["architecture"] = _filter_architecture(
                 ai_analysis.get("architecture"),
@@ -711,6 +777,34 @@ def _run_analysis(
                 repository_model.unresolved_questions
             ),
             analysis_status=analysis_status,
+            generated_output={
+                "overview": ai_analysis.get("overview"),
+                "executive_overview": ai_analysis.get("executive_overview"),
+                "modules": ai_analysis.get("modules", [])[:8],
+                "architecture": ai_analysis.get("architecture"),
+                "validated_claims": [
+                    {
+                        "text": claim.text,
+                        "state": claim.state,
+                        "category": claim.category,
+                        "target_name": claim.target_name,
+                        "confidence": claim.confidence,
+                        "evidence": [
+                            {
+                                "path": ref.path,
+                                "start_line": ref.start_line,
+                                "end_line": ref.end_line,
+                                "excerpt": ref.excerpt,
+                            }
+                            for ref in claim.evidence[:3]
+                        ],
+                    }
+                    for claim in repository_model.claims[:24]
+                ],
+                "evidence_issues": repository_model.evidence_issues[:20],
+                "contradictions": repository_model.contradictions[:20],
+                "unresolved_questions": repository_model.unresolved_questions[:20],
+            },
         )
 
         semantic_repository_profile = build_semantic_repository_profile(
@@ -857,6 +951,16 @@ def _run_analysis(
                 repository_id=repository.id,
                 analysis_status=analysis_status,
                 claim_count=len(repository_model.claims),
+            response_preview={
+                "analysis_run_id": response.analysis_run_id,
+                "repo_name": response.repo_name,
+                "analysis_status": response.analysis_status,
+                "commit_sha": response.commit_sha,
+                "overview": response.overview,
+                "modules": response.modules[:8],
+                "architecture": response.architecture,
+                "repository_model": response.repository_model,
+            },
             )
         else:
             emit(

@@ -79,6 +79,44 @@ def test_confirmed_claim_requires_exact_cited_excerpt(tmp_path):
     assert model.claims[0].confidence <= 0.65
 
 
+def test_exact_excerpt_does_not_confirm_a_semantically_unsupported_claim(tmp_path):
+    from app.services.repository_model import RepositoryClaim
+
+    (tmp_path / "settings.py").write_text("redis queue = True\n", encoding="utf-8")
+    model = RepositoryModel(commit_sha="sha", claims=[RepositoryClaim(
+        text="Redis handles asynchronous queue processing for workers",
+        state="confirmed", confidence=1,
+        evidence=[EvidenceReference(
+            path="settings.py", start_line=1, end_line=1,
+            commit_sha="sha", excerpt="redis queue = True",
+        )],
+    )]).validate_sources(RepositoryRetrieval(tmp_path))
+
+    assert model.claims[0].state == "inferred"
+    assert model.claims[0].confidence <= 0.55
+
+
+def test_generic_repository_boilerplate_is_not_confirmed_by_unrelated_evidence(tmp_path):
+    from app.services.repository_model import RepositoryClaim
+
+    (tmp_path / "README.md").write_text(
+        "# Package\n\nInstall dependencies with npm install.\n", encoding="utf-8"
+    )
+    model = RepositoryModel(commit_sha="sha", claims=[RepositoryClaim(
+        text=(
+            "It brings the project files, documented purpose, and visible "
+            "repository structure together into a usable product for users."
+        ),
+        subject="overview", category="overview", state="confirmed", confidence=1,
+        evidence=[EvidenceReference(
+            path="README.md", start_line=1, end_line=3, commit_sha="sha",
+            excerpt="# Package\n\nInstall dependencies with npm install.",
+        )],
+    )]).validate_sources(RepositoryRetrieval(tmp_path))
+
+    assert model.claims[0].state == "rejected"
+
+
 def test_claim_without_references_remains_unknown(tmp_path):
     from app.services.repository_model import RepositoryClaim
 

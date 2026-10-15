@@ -378,6 +378,28 @@ export interface AnalyzeRepositoryResponse {
   message?: string;
 }
 
+function sanitizeAnalysisLog(value: unknown, depth = 0): unknown {
+  if (depth > 5) return '[nested value omitted]';
+  if (typeof value === 'string') {
+    return value
+      .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, '$1[REDACTED]')
+      .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]')
+      .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '[REDACTED_TOKEN]')
+      .slice(0, 1200);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 24).map(item => sanitizeAnalysisLog(item, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).slice(0, 48).map(([key, item]) =>
+      /api.?key|authorization|secret|password|credential/i.test(key)
+        ? [key, '[REDACTED]']
+        : [key, sanitizeAnalysisLog(item, depth + 1)]
+    ));
+  }
+  return value;
+}
+
 function normalizeAiInsights(result: Partial<AnalyzeRepositoryResponse>): string[] {
   const explicit = Array.isArray(result.ai_insights)
     ? result.ai_insights.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -472,7 +494,7 @@ export async function analyzeRepository(
   const requestStarted = performance.now();
   const safeRepoUrl = data.repo_url?.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0];
   const log = (event: string, fields: Record<string, unknown> = {}) =>
-    console.info('[RepoIQ analysis]', { analysis_run_id: runId, event, ...fields });
+    console.info('[RepoIQ analysis]', sanitizeAnalysisLog({ analysis_run_id: runId, event, ...fields }));
   log('analyze_click_or_request_initiated', { repository_url: safeRepoUrl, has_local_path: Boolean(data.local_path) });
 
   let apiBase: string;
@@ -493,6 +515,16 @@ export async function analyzeRepository(
   }
 
   try {
+    log('api_request_body_prepared', {
+      method: 'POST',
+      repository_url: safeRepoUrl,
+      has_local_path: Boolean(data.local_path),
+      analysis_run_id: runId,
+      content_type: 'application/json',
+      body_bytes: new TextEncoder().encode(
+        JSON.stringify({ ...data, analysis_run_id: runId })
+      ).length,
+    });
     const response = await fetchWithDefensiveRetry(`${apiBase}/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -515,6 +547,31 @@ export async function analyzeRepository(
     }
     const result = rawResult as AnalyzeRepositoryResponse;
     const responseRunId = result.analysis_run_id || runId;
+    log('api_response_parsed_snapshot', {
+      response_status: result.status,
+      analysis_status: result.analysis_status,
+      commit_sha: result.commit_sha,
+      repo_name: result.repo_name,
+      overview: result.overview,
+      executive_overview: result.executive_overview,
+      modules: Array.isArray(result.modules) ? result.modules.slice(0, 8) : [],
+      architecture: result.architecture,
+      repository_model: result.repository_model
+        ? {
+            commit_sha: result.repository_model.commit_sha,
+            claims: Array.isArray(result.repository_model.claims)
+              ? result.repository_model.claims.slice(0, 24)
+              : [],
+            components: Array.isArray(result.repository_model.components)
+              ? result.repository_model.components.slice(0, 16)
+              : [],
+            contradictions: result.repository_model.contradictions,
+            evidence_issues: result.repository_model.evidence_issues,
+            unresolved_questions: result.repository_model.unresolved_questions,
+            coverage: result.repository_model.coverage,
+          }
+        : undefined,
+    });
     if (!result.analysis_run_id) log('api_response_missing_run_id');
     if (responseRunId !== runId) log('api_response_run_id_mismatch', { response_run_id: responseRunId });
     if (typeof result.status !== 'string' || !['success', 'error'].includes(result.status)) {
@@ -531,8 +588,29 @@ export async function analyzeRepository(
         error: result.message || `Analysis failed. Correlation ID: ${responseRunId}` };
     }
 
-    const analysisStatus = result.analysis_status || 'unknown';
-    const finalState = analysisStatus === 'partial' || analysisStatus === 'degraded' ? analysisStatus : 'success';
+    const hasValidatedModel = Boolean(
+      result.analysis_run_id && result.commit_sha && result.repository_model &&
+      ['complete', 'success', 'ai_generated', 'partial', 'degraded'].includes(result.analysis_status || '')
+    );
+    const analysisStatus = result.analysis_status || 'partial';
+    const finalState = !hasValidatedModel
+      ? 'partial'
+      : analysisStatus === 'degraded'
+        ? 'degraded'
+        : analysisStatus === 'partial'
+          ? 'partial'
+          : 'success';
+    if (!hasValidatedModel) {
+      log('api_response_incomplete_analysis_metadata', {
+        missing_fields: [
+          !result.analysis_run_id && 'analysis_run_id',
+          !result.commit_sha && 'commit_sha',
+          !result.repository_model && 'repository_model',
+          !result.analysis_status && 'analysis_status',
+        ].filter(Boolean),
+        final_state: finalState,
+      });
+    }
     const keyFeatures = normalizeAiInsights(result);
     log('api_analysis_result_received', {
       final_state: finalState, analysis_status: analysisStatus, commit_sha: result.commit_sha,
@@ -546,7 +624,7 @@ export async function analyzeRepository(
       keyFeatures, overview: result.overview, executive_overview: result.executive_overview,
       architecture: result.architecture, architecture_summary: result.architecture_summary, modules: result.modules,
       similar_repositories: result.similar_repositories, analysis_evidence: result.analysis_evidence ?? {},
-      analysis_status: analysisStatus, commit_sha: result.commit_sha, repository_model: result.repository_model,
+      analysis_status: finalState, commit_sha: result.commit_sha, repository_model: result.repository_model,
       ai_insights: result.ai_insights ?? keyFeatures, languages: result.languages,
     };
   } catch (error) {

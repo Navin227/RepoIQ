@@ -143,8 +143,8 @@ class RepositoryModel(BaseModel):
                 claim.confidence = min(claim.confidence, 0.2 if overlap == 0 else 0.55) if claim.evidence else 0
             else:
                 exact_quotes = bool(claim.evidence) and all(ref.excerpt for ref in claim.evidence)
-                claim.state = "confirmed" if exact_quotes else "inferred"
-                claim.confidence = max(claim.confidence, 0.7) if exact_quotes else min(claim.confidence, 0.65)
+                claim.state = "confirmed" if exact_quotes and overlap >= 0.5 else "inferred"
+                claim.confidence = max(claim.confidence, 0.7) if claim.state == "confirmed" else min(claim.confidence, 0.55)
 
         unique: dict[tuple[str, str], RepositoryClaim] = {}
         for claim in self.claims:
@@ -185,7 +185,18 @@ class RepositoryModel(BaseModel):
 
 
 def _content_tokens(value: str) -> list[str]:
-    ignored = {"this", "that", "with", "from", "into", "have", "does", "uses", "used", "the", "and", "for", "are", "was", "will", "can", "provides", "supports"}
+    # Generic repository-level wording must not count as evidence for a
+    # specific product, capability, or architectural claim.
+    ignored = {
+        "this", "that", "with", "from", "into", "have", "does", "uses",
+        "used", "the", "and", "for", "are", "was", "will", "can",
+        "provides", "supports", "project", "repository", "files", "file",
+        "documented", "purpose", "visible", "structure", "usable", "product",
+        "tool", "intended", "users", "user", "main", "application",
+        "experience", "supporting", "areas", "included", "operational",
+        "setup", "available", "evidence", "together", "brings", "interact",
+        "rely", "maintain", "run", "system", "platform",
+    }
     return [word for word in re.findall(r"[a-z0-9_]{3,}", value.casefold()) if word not in ignored]
 
 

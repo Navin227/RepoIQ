@@ -67,11 +67,40 @@ class LLMService:
                      round=round_number + 1, purpose="initial_analysis" if round_number == 0 else "evidence_followup",
                      evidence_file_count=len(payload.get("selected_source_file_details", [])),
                      retrieved_match_count=len(payload.get("on_demand_source_matches", [])))
+                source_details = (
+                    (payload.get("source_evidence") or {}).get(
+                        "selected_source_file_details", []
+                    )
+                    if isinstance(payload.get("source_evidence"), dict)
+                    else []
+                )
+                emit(logger, "llm_request_context_snapshot", stage="llm_request",
+                     analysis_run_id=analysis_id, round=round_number + 1,
+                     repository=metadata.get("full_name") or metadata.get("name"),
+                     commit_sha=metadata.get("commit_sha"),
+                     context={
+                         "metadata": payload.get("metadata"),
+                         "readme_preview": str(payload.get("readme_text") or "")[:1800],
+                         "technology_stack": payload.get("detected_technology_stack"),
+                         "inventory_count": payload.get("inventory_file_count"),
+                         "source_file_previews": [
+                             {key: item.get(key) for key in ("path", "role", "symbols", "imports")}
+                             | {"content_preview": str(item.get("content") or "")[:500]}
+                             for item in source_details[:8] if isinstance(item, dict)
+                         ],
+                         "retrieved_matches": [
+                             {key: item.get(key) for key in ("path", "start_line", "end_line", "text", "match_kind")}
+                             for item in payload.get("on_demand_source_matches", [])[:12]
+                             if isinstance(item, dict)
+                         ],
+                         "investigation_coverage": payload.get("investigation_coverage"),
+                     })
                 response_text = self._generate_with_gemini(payload)
                 self._log_gemini_output(analysis_id, self.provider, response_text)
                 emit(logger, "llm_response_received", stage="llm_request", analysis_run_id=analysis_id,
                      round=round_number + 1, duration_ms=round((time.perf_counter() - llm_started) * 1000),
-                     response_chars=len(response_text), response_status="received")
+                     response_chars=len(response_text), response_status="received",
+                     response_preview=response_text[:2400])
                 try:
                     generated = self._parse_json_response(response_text)
                 except Exception as exc:
@@ -82,7 +111,18 @@ class LLMService:
                 requests = generated.get("investigation_requests", []) if isinstance(generated, dict) else []
                 emit(logger, "llm_response_parsed", stage="llm_response_parse", analysis_run_id=analysis_id,
                      round=round_number + 1, claim_count=len(generated.get("claims", [])),
-                     module_count=len(generated.get("modules", [])), investigation_request_count=len(requests))
+                     module_count=len(generated.get("modules", [])), investigation_request_count=len(requests),
+                     parsed_result={
+                         "overview": generated.get("overview"),
+                         "executive_overview": generated.get("executive_overview"),
+                         "modules": generated.get("modules", [])[:6]
+                         if isinstance(generated.get("modules"), list) else [],
+                         "architecture": generated.get("architecture"),
+                         "claims": generated.get("claims", [])[:16]
+                         if isinstance(generated.get("claims"), list) else [],
+                         "investigation_requests": requests[:12]
+                         if isinstance(requests, list) else [],
+                     })
                 if not requests:
                     if payload.get("investigation_coverage"):
                         payload["investigation_coverage"] = {
@@ -247,6 +287,11 @@ Rules:
   before drafting the overview. Explain the actual product and concrete user
   workflows; do not pad the overview with generic statements about repository
   contents, folders, or application layers.
+- Never describe the repository itself as bringing files, documentation,
+  folders, or operational setup together into a product. Such statements are
+  filler and are not findings. Identify the named product/domain, concrete
+  user action, and observable result from repository evidence; if those are
+  not clear, return the supplied unknown value and an investigation request.
 - Every user_features item must describe a user-visible action or outcome,
   not a technology, directory, package, or architectural layer. Include
   evidence: exact implementation source paths or README.md that supports it.
@@ -268,6 +313,10 @@ Rules:
 - Flow must be ordered. Component cards should describe actual responsibilities.
 - Communication and deployment must be supported by repository evidence.
 - Return a claim record for every significant summary, capability, module, architecture, deployment, integration, or data-flow statement. Cite exact source paths, exact line ranges, and exact excerpts. Do not cite a file without a relevant range. If evidence is missing, omit the claim and leave investigation_requests.
+- A verbatim excerpt is not sufficient by itself: the excerpt must directly
+  support the full meaning of its claim. Keep overview claims specific to this
+  repository and cite product documentation plus implementation evidence when
+  available. Do not generalize from filenames or directory names.
 - Keep the complete JSON concise. Return at most 6 user features and 16 claims. Keep each evidence excerpt under 240 characters. Do not repeat the same fact in multiple claims.
 - When required source evidence is missing, return up to 12 focused investigation_requests. Search exact symbols, identifiers, imports or configuration keys. Leave the list empty when findings are supported.
 """
