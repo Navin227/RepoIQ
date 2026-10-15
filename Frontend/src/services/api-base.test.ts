@@ -38,6 +38,29 @@ test('configured Lambda Function URL is resolved as the production API origin', 
   );
 });
 
+test('explicit temporary API override takes precedence over Amplify and runtime APIs', () => {
+  assert.equal(
+    resolveApiBase({
+      developmentApiBase: 'https://temporary-backend.ngrok.app',
+      configuredApiBase: 'https://production.example.test',
+      runtimeApiBase: 'https://demo.example.test',
+      pageOrigin: 'https://main.example.test',
+    }),
+    'https://temporary-backend.ngrok.app',
+  );
+});
+
+test('temporary API override still rejects insecure HTTP from the deployed frontend', () => {
+  assert.throws(
+    () => resolveApiBase({
+      developmentApiBase: 'http://temporary-backend.example.test',
+      configuredApiBase: 'https://production.example.test',
+      pageOrigin: 'https://main.example.test',
+    }),
+    /Mixed-content configuration/,
+  );
+});
+
 test('HTTPS frontend rejects HTTP runtime URL instead of falling back to it', () => {
   assert.throws(
     () => resolveApiBase({

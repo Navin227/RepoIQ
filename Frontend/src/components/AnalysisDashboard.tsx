@@ -23,7 +23,7 @@ interface AnalysisDashboardProps {
   onSaveToggle: (fullName: string) => void;
   onBackToSearch: () => void;
   onAnalyze: (repoUrl: string) => void;
-  serverAvailable: boolean;
+  apiAvailable: boolean;
 }
 
 function getEvidenceText(value: unknown): string {
@@ -276,7 +276,7 @@ const iconMap: Record<string, LucideIcon> = {
   code: Code,
 };
 
-export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackToSearch, onAnalyze, serverAvailable }: AnalysisDashboardProps) {
+export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackToSearch, onAnalyze, apiAvailable }: AnalysisDashboardProps) {
   const [viewMode, setViewMode] = useState<'overview' | 'modules' | 'analysis'>('overview');
   const [activeTab, setActiveTab] = useState<'architecture' | 'technology' | 'structure' | 'readme'>('architecture');
   const [activeConnectIdx, setActiveConnectIdx] = useState<number | null>(null);
@@ -504,8 +504,8 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
           <button
             type="button"
             onClick={() => onAnalyze(repo.url)}
-            disabled={!serverAvailable}
-            title={serverAvailable ? 'Re-analyze repository' : 'Analysis server is unavailable'}
+            disabled={!apiAvailable}
+            title={apiAvailable ? 'Re-analyze repository' : 'API endpoint is not configured'}
             className="px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 bg-white/[0.03] text-gray-300 border border-white/[0.06] hover:bg-white/[0.06]"
           >
             <Sparkles className="h-4 w-4 text-purple-300" />

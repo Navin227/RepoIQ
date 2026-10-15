@@ -3,24 +3,24 @@ import { Search, Sparkles, AlertCircle, ArrowRight, CornerDownLeft, Command } fr
 
 interface HeroProps {
   onSearch: (query: string) => void;
-  serverAvailable: boolean;
+  apiAvailable: boolean;
 }
 
 export default function Hero({
   onSearch,
-  serverAvailable,
+  apiAvailable,
 }: HeroProps) {
   const [query, setQuery] = useState('');
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (query.trim() && serverAvailable) {
+    if (query.trim() && apiAvailable) {
       onSearch(query);
     }
   };
 
   const handleSuggestionClick = (text: string) => {
-    if (!serverAvailable) return;
+    if (!apiAvailable) return;
     setQuery(text);
     onSearch(text);
   };
@@ -99,7 +99,7 @@ export default function Hero({
               type="submit"
               className="inline-flex items-center justify-center px-6 py-3 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-purple-700 hover:from-purple-500 hover:to-purple-600 font-semibold text-white shadow-lg transition-all duration-200 cursor-pointer text-sm shrink-0 hover:translate-x-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
               id="search-submit-btn"
-              disabled={!serverAvailable}
+              disabled={!apiAvailable}
             >
               Analyze Project
               <ArrowRight className="ml-2 h-4 w-4" />
@@ -115,7 +115,7 @@ export default function Hero({
                 type="button"
                 onClick={() => handleSuggestionClick(item)}
                 className="px-2.5 py-1 rounded-md bg-white/[0.02] hover:bg-white/[0.06] text-gray-400 hover:text-white border border-white/[0.04] hover:border-white/[0.1] font-mono transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={!serverAvailable}
+                disabled={!apiAvailable}
               >
                 {item}
               </button>
@@ -134,7 +134,7 @@ export default function Hero({
                 key={index}
                 onClick={() => handleSuggestionClick(tag.value)}
                 className="px-4 py-2 rounded-xl bg-white/[0.03] text-sm text-gray-300 border border-white/[0.06] hover:border-[#8B5CF6]/50 hover:bg-[#8B5CF6]/5 transition-all duration-300 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={!serverAvailable}
+                disabled={!apiAvailable}
               >
                 {tag.label}
               </button>

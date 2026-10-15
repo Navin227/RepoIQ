@@ -1,17 +1,36 @@
 export interface ApiBaseContext {
   configuredApiBase?: string | null;
   runtimeApiBase?: string | null;
+  developmentApiBase?: string | null;
   pageOrigin: string;
+}
+
+const DEVELOPMENT_API_BASE_KEY = 'repoiq.devApiBase';
+
+/** Explicit, browser-local override for temporarily testing a deployed UI. */
+export function getDevelopmentApiBaseOverride(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(DEVELOPMENT_API_BASE_KEY)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function usesDevelopmentApiBaseOverride(): boolean {
+  return getDevelopmentApiBaseOverride() !== null;
 }
 
 export function resolveApiBase({
   configuredApiBase,
   runtimeApiBase,
+  developmentApiBase,
   pageOrigin,
 }: ApiBaseContext): string {
   const configured = configuredApiBase?.trim();
   const runtime = runtimeApiBase?.trim();
-  const candidateValue = configured || runtime;
+  const development = developmentApiBase?.trim();
+  const candidateValue = development || configured || runtime;
 
   if (!candidateValue) {
     if (new URL(pageOrigin).protocol === 'https:') {

@@ -16,10 +16,10 @@ interface SearchResultsProps {
   onAnalyze: (repoUrl: string) => void;
   onBackToHome: () => void;
   onSearch: (query: string) => void;
-  serverAvailable: boolean;
+  apiAvailable: boolean;
 }
 
-export default function SearchResults({ query, results, isLoading, error, analyzingRepoUrl, analyzeMessageByUrl, onAnalyze, onBackToHome, onSearch, serverAvailable }: SearchResultsProps) {
+export default function SearchResults({ query, results, isLoading, error, analyzingRepoUrl, analyzeMessageByUrl, onAnalyze, onBackToHome, onSearch, apiAvailable }: SearchResultsProps) {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('All');
   const [sortBy, setSortBy] = useState<'stars' | 'forks' | 'relevance'>('relevance');
 
@@ -155,13 +155,13 @@ export default function SearchResults({ query, results, isLoading, error, analyz
               placeholder="Search project ideas or paste a GitHub repository URL..."
               className="w-full bg-transparent text-white placeholder-gray-500 py-3 text-base font-sans outline-none focus:ring-0 focus:outline-none"
               id="explore-search-input"
-              disabled={!serverAvailable}
+              disabled={!apiAvailable}
             />
           </div>
           
           <button
             type="submit"
-            disabled={!serverAvailable}
+            disabled={!apiAvailable}
             className="inline-flex items-center justify-center px-6 py-3 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-purple-700 hover:from-purple-500 hover:to-purple-600 font-semibold text-white shadow-lg transition-all duration-200 cursor-pointer text-sm shrink-0"
             id="explore-search-submit"
           >
@@ -177,7 +177,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
             <button
               key={idx}
               onClick={() => handleChipClick(chip)}
-              disabled={!serverAvailable}
+              disabled={!apiAvailable}
               className="px-3.5 py-1.5 text-xs rounded-xl bg-white/[0.02] text-gray-300 border border-white/[0.05] hover:border-[#8B5CF6]/40 hover:bg-[#8B5CF6]/5 transition-all cursor-pointer font-sans"
             >
               {chip}
@@ -387,7 +387,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
 
               <h3
                 className="text-lg font-bold text-white tracking-tight font-mono group-hover:underline cursor-pointer"
-                onClick={() => serverAvailable && onAnalyze(repoUrl)}
+                onClick={() => apiAvailable && onAnalyze(repoUrl)}
               >
                 {safeFullName}
               </h3>
@@ -417,7 +417,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
           <div className="flex sm:flex-col items-end justify-between sm:justify-start gap-4 shrink-0">
             <button
               onClick={() => onAnalyze(repoUrl)}
-              disabled={!serverAvailable || isAnalyzing}
+              disabled={!apiAvailable || isAnalyzing}
               className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-purple-700 hover:from-purple-500 hover:to-purple-600/90 text-xs font-semibold text-white tracking-wide shadow-md transition-transform cursor-pointer hover:translate-x-0.5 flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
               id={`analyze-btn-${repoSlug}`}
             >

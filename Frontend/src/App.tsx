@@ -11,6 +11,7 @@ import {
   analyzeRepository,
   searchRepositories,
 } from './services/api';
+import { getDevelopmentApiBaseOverride } from './services/api-base';
 import { SimilarRepo, Repository } from './types';
 import {
   Star,
@@ -427,21 +428,18 @@ export default function App() {
    */
   const demoApiUrl =
     demoStatus?.application_url?.trim() || null;
+  // API availability is independent of the EC2/K3s demo lifecycle.
+  const analysisApiAvailable = Boolean(
+    getDevelopmentApiBaseOverride() ||
+    import.meta.env.VITE_API_BASE_URL?.trim() ||
+    demoApiUrl
+  );
 
   // ──────────────────────────────────────────────
   // Search
   // ──────────────────────────────────────────────
 
   const handleSearch = async (query: string) => {
-    if (serverStatus !== 'online') {
-      console.warn('[RepoIQ] Search blocked: server has not been started.');
-      setSearchError(
-        SERVER_OFFLINE_MESSAGE
-      );
-
-      return;
-    }
-
     const trimmed = query.trim();
 
     if (!trimmed) return;
@@ -507,16 +505,6 @@ export default function App() {
     const analysisLog = (event: string, fields: Record<string, unknown> = {}) =>
       console.info('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event, ...fields });
     analysisLog('analyze_button_clicked', { repository_url: repoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
-    if (serverStatus !== 'online') {
-      analysisLog('analysis_blocked', { reason: 'server_not_online' });
-      setAnalyzeMessageByUrl(prev => ({
-        ...prev,
-        [repoUrl]: SERVER_OFFLINE_MESSAGE,
-      }));
-
-      return;
-    }
-
     setAnalyzingRepoUrl(repoUrl);
 
     setAnalyzeMessageByUrl(prev => ({
@@ -1674,8 +1662,8 @@ export default function App() {
                 onSearch={
                   handleSearch
                 }
-                serverAvailable={
-                  serverStatus === 'online'
+                apiAvailable={
+                  analysisApiAvailable
                 }
               />
 
@@ -1760,9 +1748,8 @@ export default function App() {
                 onSearch={
                   handleSearch
                 }
-                serverAvailable={
-                  serverStatus ===
-                  'online'
+                apiAvailable={
+                  analysisApiAvailable
                 }
               />
             </div>
@@ -1787,9 +1774,8 @@ export default function App() {
                 onAnalyze={
                   handleAnalyze
                 }
-                serverAvailable={
-                  serverStatus ===
-                  'online'
+                apiAvailable={
+                  analysisApiAvailable
                 }
                 onBackToSearch={() => {
                   if (
@@ -1920,10 +1906,7 @@ export default function App() {
                                 repo.fullName
                               )
                             }
-                            disabled={
-                              serverStatus !==
-                              'online'
-                            }
+                            disabled={!analysisApiAvailable}
                             className="px-3 py-1.5 rounded-lg bg-white/[0.04] text-[11px] font-semibold text-white hover:bg-[#8B5CF6] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             Inspect Code

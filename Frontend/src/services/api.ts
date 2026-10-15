@@ -7,7 +7,12 @@ import type {
   SimilarRepo,
   TechStack,
 } from '../types';
-import { buildSearchRequestUrl, resolveApiBase } from './api-base';
+import {
+  buildSearchRequestUrl,
+  getDevelopmentApiBaseOverride,
+  resolveApiBase,
+  usesDevelopmentApiBaseOverride,
+} from './api-base';
 
 class ApiNetworkError extends Error {
   constructor(operation: string, url: string) {
@@ -31,7 +36,10 @@ const fetchWithDefensiveRetry = async (
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await fetch(url, options);
+      const requestOptions = usesDevelopmentApiBaseOverride()
+        ? { ...options, credentials: 'include' as const }
+        : options;
+      return await fetch(url, requestOptions);
     } catch (error) {
       if (attempt === MAX_ATTEMPTS) {
         if (error instanceof TypeError) {
@@ -442,12 +450,13 @@ export async function searchRepositories(
   const apiBase = resolveApiBase({
     configuredApiBase: import.meta.env.VITE_API_BASE_URL,
     runtimeApiBase,
+    developmentApiBase: getDevelopmentApiBaseOverride(),
     pageOrigin: window.location.origin,
   });
 
   if (!apiBase) {
     throw new Error(
-      'RepoIQ server URL is unavailable. Start the demo server first.'
+      'RepoIQ API URL is unavailable. Configure a backend API endpoint first.'
     );
   }
 
@@ -502,6 +511,7 @@ export async function analyzeRepository(
     apiBase = resolveApiBase({
       configuredApiBase: import.meta.env.VITE_API_BASE_URL,
       runtimeApiBase,
+      developmentApiBase: getDevelopmentApiBaseOverride(),
       pageOrigin: window.location.origin,
     });
   } catch (error) {
@@ -511,7 +521,7 @@ export async function analyzeRepository(
 
   if (!apiBase) {
     log('api_configuration_missing');
-    return { status: 'error', analysis_run_id: runId, error: `RepoIQ server URL is unavailable. Correlation ID: ${runId}` };
+    return { status: 'error', analysis_run_id: runId, error: `RepoIQ API URL is unavailable. Correlation ID: ${runId}` };
   }
 
   try {
