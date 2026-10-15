@@ -7,6 +7,7 @@ import type {
   SimilarRepo,
   TechStack,
 } from '../types';
+import { normalizeTerminalAnalysisStatus } from './analysis-status';
 import {
   buildSearchRequestUrl,
   getDevelopmentApiBaseOverride,
@@ -619,28 +620,57 @@ export async function analyzeRepository(
         error: result.message || `Analysis failed. Correlation ID: ${responseRunId}` };
     }
 
-    const hasValidatedModel = Boolean(
-      result.analysis_run_id && result.commit_sha && result.repository_model &&
-      ['complete', 'success', 'ai_generated', 'partial', 'unavailable', 'failed', 'degraded'].includes(result.analysis_status || '')
+    const modelCommitSha = typeof result.repository_model?.commit_sha === 'string'
+      ? result.repository_model.commit_sha : undefined;
+    const commitSha = result.commit_sha || modelCommitSha;
+    const hasNarrative = (value: unknown) => typeof value === 'string'
+      && Boolean(value.trim())
+      && !['unknown', 'unable to confidently determine from repository evidence.'].includes(value.trim().toLowerCase());
+    const hasReportSections = Boolean(result.report_sections && Object.values(result.report_sections).some(value =>
+      Array.isArray(value) ? value.length > 0 : hasNarrative(value) || Boolean(value && typeof value === 'object' && Object.keys(value).length > 0)
+    ));
+    const hasUsefulOutput = Boolean(
+      hasNarrative(result.overview) || result.modules?.some(module => Boolean(module?.name?.trim())) ||
+      hasNarrative(result.architecture?.architecture_summary) || hasNarrative(result.architecture?.summary) ||
+      result.architecture?.components?.length || hasReportSections
     );
-    const rawAnalysisStatus = result.analysis_status || 'failed';
-    const analysisStatus = ['success', 'ai_generated'].includes(rawAnalysisStatus) ? 'complete'
-      : rawAnalysisStatus === 'degraded' || rawAnalysisStatus === 'error' ? 'failed' : rawAnalysisStatus;
-    const finalState = !hasValidatedModel ? 'failed' : analysisStatus;
-    if (!hasValidatedModel) {
+    const pipelineDiagnostics = (result.analysis_evidence?.pipeline_diagnostics || {}) as Record<string, any>;
+    const requiredStageFailed = ['context_preparation', 'gemma', 'gemini', 'gemini_output'].some(stage =>
+      ['failed', 'malformed'].includes(pipelineDiagnostics[stage]?.status)
+    ) || /(?:provider_failure|context_preparation_failure|malformed_output)/i.test(result.error_code || '');
+    const missingValidationMetadata = !result.repository_model || !commitSha;
+    // Older API deployments may omit validation metadata even when they return
+    // a report. Preserve useful output and mark its missing source trace as
+    // partial; missing commit SHA alone must never turn the report into failed.
+    const hasRecognizedStatus = ['complete', 'success', 'ai_generated', 'partial', 'unavailable', 'failed', 'degraded'].includes(result.analysis_status || '');
+    const finalState = normalizeTerminalAnalysisStatus({
+      backendStatus: result.analysis_status,
+      hasUsefulOutput,
+      hasValidationMetadata: !missingValidationMetadata,
+      requiredStageFailed,
+    });
+    if (!hasRecognizedStatus || missingValidationMetadata) {
       log('api_response_incomplete_analysis_metadata', {
         missing_fields: [
           !result.analysis_run_id && 'analysis_run_id',
-          !result.commit_sha && 'commit_sha',
+          !commitSha && 'commit_sha',
           !result.repository_model && 'repository_model',
-          !result.analysis_status && 'analysis_status',
+          !hasRecognizedStatus && 'analysis_status',
         ].filter(Boolean),
         final_state: finalState,
       });
     }
+    if (result.analysis_status === 'failed' && finalState === 'partial') {
+      log('failed_status_with_usable_report_normalized', {
+        reason: 'legacy_failure_status_without_required_stage_failure',
+        module_count: result.modules?.length || 0,
+        has_overview: hasNarrative(result.overview),
+      });
+    }
+    const analysisStatus = finalState;
     const keyFeatures = normalizeAiInsights(result);
     log('api_analysis_result_received', {
-      final_state: finalState, analysis_status: analysisStatus, commit_sha: result.commit_sha,
+      final_state: finalState, analysis_status: analysisStatus, commit_sha: commitSha,
       claim_count: Array.isArray(result.repository_model?.claims) ? result.repository_model.claims.length : 0,
       module_count: Array.isArray(result.modules) ? result.modules.length : 0,
     });
@@ -651,7 +681,7 @@ export async function analyzeRepository(
       keyFeatures, overview: result.overview, executive_overview: result.executive_overview,
       architecture: result.architecture, architecture_summary: result.architecture_summary, modules: result.modules,
       similar_repositories: result.similar_repositories, analysis_evidence: result.analysis_evidence ?? {},
-      analysis_status: finalState, commit_sha: result.commit_sha, repository_model: result.repository_model,
+      analysis_status: finalState, commit_sha: commitSha, repository_model: result.repository_model,
       coverage_manifest: result.coverage_manifest,
       report_sections: result.report_sections,
       ai_insights: result.ai_insights ?? keyFeatures, languages: result.languages,

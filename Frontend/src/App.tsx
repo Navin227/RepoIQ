@@ -533,7 +533,6 @@ export default function App() {
       analysisStatus: 'running',
       analysisRunId,
     });
-    setCurrentTab('analyze');
     setAnalyzingRepoUrl(repoUrl);
 
     setAnalyzeMessageByUrl(prev => ({
@@ -658,6 +657,9 @@ export default function App() {
           analysisEvidence:
             result.analysis_evidence ?? {},
           analysisStatus: result.analysis_status ?? result.status,
+          analysisError: result.analysis_status === 'failed'
+            ? result.error || 'A required analysis stage failed. See pipeline diagnostics for details.'
+            : undefined,
           commitSha: result.commit_sha,
           repositoryModel: result.repository_model,
           analysisRunId: result.analysis_run_id || analysisRunId,
@@ -668,7 +670,7 @@ export default function App() {
           [repoUrl]: '',
         }));
 
-        setCurrentTab('analyze');
+        if (result.analysis_status !== 'failed') setCurrentTab('analyze');
       } else {
         analysisLog('frontend_analysis_failed', { error: result.error || 'Analysis failed' });
         setAnalyzedRepo(current => current?.analysisRunId === analysisRunId
@@ -1539,6 +1541,22 @@ export default function App() {
       />
 
       <main className="flex-grow">
+        {analyzingRepoUrl && (
+          <div role="status" aria-live="polite" className="mx-auto mt-5 max-w-7xl px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center gap-3 rounded-xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
+              <Sparkles className="h-4 w-4 animate-pulse" />
+              <span>Preparing analysis for {getRepoFullName(analyzingRepoUrl)}. You can keep browsing; results will open when ready.</span>
+            </div>
+          </div>
+        )}
+        {!analyzingRepoUrl && analyzedRepo?.analysisStatus === 'failed' && currentTab !== 'analyze' && (
+          <div role="alert" className="mx-auto mt-5 max-w-7xl px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              <span>Analysis for {analyzedRepo.fullName} did not complete. {analyzedRepo.analysisError}</span>
+              <button onClick={() => handleAnalyze(analyzedRepo.url)} className="rounded-lg border border-red-200/20 px-3 py-1.5 hover:bg-red-400/10">Try again</button>
+            </div>
+          </div>
+        )}
         {/* Server Status Banner — Home page only */}
         {currentTab === 'home' && (
           <div

@@ -399,7 +399,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
               className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-purple-700 hover:from-purple-500 hover:to-purple-600/90 text-xs font-semibold text-white tracking-wide shadow-md transition-transform cursor-pointer hover:translate-x-0.5 flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
               id={`analyze-btn-${repoSlug}`}
             >
-              {isAnalyzing ? 'Cloning...' : 'Analyze Repo'}
+              {isAnalyzing ? 'Analyzing...' : 'Analyze Repo'}
               <ChevronRight className="h-3.5 w-3.5" />
             </button>
 
