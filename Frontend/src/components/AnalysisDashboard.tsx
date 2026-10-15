@@ -328,27 +328,72 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
   const asyncPath = getStringList(architectureData?.async_path).filter((step) => step !== UNKNOWN_EVIDENCE);
   const deploymentSummary = getEvidenceText(architectureData?.deployment);
   const rawExecutiveOverview = repo.overview?.executiveOverview;
-  const overviewSummary = getEvidenceText(repo.overview?.aiSummary);
+  const genericNarrativePatterns = [
+    /brings? the project files/i,
+    /documented purpose/i,
+    /visible repository structure/i,
+    /usable product or tool/i,
+    /available repository evidence/i,
+    /main application experience/i,
+    /supporting project areas/i,
+    /operational setup/i,
+    /primary purpose is inferred from the readme/i,
+    /code organized into modules for application behavior/i,
+  ];
+  const cleanNarrative = (value: string) => {
+    if (value === UNKNOWN_EVIDENCE) return value;
+    return (value.match(/[^.!?]+[.!?]*/g) ?? [value])
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence && !genericNarrativePatterns.some((pattern) => pattern.test(sentence)))
+      .join(' ')
+      .trim();
+  };
+  const overviewSummary = cleanNarrative(getEvidenceText(repo.overview?.aiSummary));
   const repositoryDescription = getEvidenceText(repo.description);
+  const genericFeatureNames = new Set([
+    'backend', 'database', 'platform', 'www',
+    'docs', 'documentation', 'tests', 'test', 'services', 'components',
+    'controllers', 'models', 'utils', 'utilities', 'infrastructure',
+  ]);
+  const isRepositoryAreaFeature = (feature: { name: string; description: string }) => {
+    const name = feature.name.trim().toLocaleLowerCase();
+    const description = feature.description.trim().toLocaleLowerCase();
+    return name.startsWith('.') || genericFeatureNames.has(name) || [
+      /top-level repository module/,
+      /user-facing interface and client-side application code/,
+      /persistence layer for application data and metadata/,
+      /area visible in repository structure/,
+    ].some((pattern) => pattern.test(description));
+  };
+  const displayedFeatureNames = new Set<string>();
   const executiveOverview: ExecutiveOverview = {
     what_is_this_project: getStringList(rawExecutiveOverview?.what_is_this_project).length > 0
       ? getStringList(rawExecutiveOverview?.what_is_this_project)
+          .map(cleanNarrative)
+          .filter((item) => item && item !== UNKNOWN_EVIDENCE)
       : [overviewSummary !== UNKNOWN_EVIDENCE ? overviewSummary : repositoryDescription],
-    why_was_it_built: getEvidenceText(rawExecutiveOverview?.why_was_it_built),
+    why_was_it_built: cleanNarrative(getEvidenceText(rawExecutiveOverview?.why_was_it_built)),
     user_features: Array.isArray(rawExecutiveOverview?.user_features)
       ? rawExecutiveOverview.user_features.filter((feature) =>
           feature &&
           typeof feature.name === 'string' &&
           feature.name.trim().length > 0 &&
           typeof feature.description === 'string' &&
-          feature.description.trim().length > 0
+          feature.description.trim().length > 0 &&
+          !isRepositoryAreaFeature(feature) &&
+          !displayedFeatureNames.has(feature.name.trim().toLocaleLowerCase()) &&
+          Boolean(displayedFeatureNames.add(feature.name.trim().toLocaleLowerCase()))
         )
       : [],
-    typical_use_cases: getStringList(rawExecutiveOverview?.typical_use_cases),
-    who_is_this_for: getStringList(rawExecutiveOverview?.who_is_this_for),
-    why_is_it_valuable: getEvidenceText(rawExecutiveOverview?.why_is_it_valuable),
-    one_line_summary: getEvidenceText(rawExecutiveOverview?.one_line_summary) !== UNKNOWN_EVIDENCE
-      ? getEvidenceText(rawExecutiveOverview?.one_line_summary)
+    typical_use_cases: getStringList(rawExecutiveOverview?.typical_use_cases)
+      .map(cleanNarrative)
+      .filter((item) => item && item !== UNKNOWN_EVIDENCE),
+    who_is_this_for: getStringList(rawExecutiveOverview?.who_is_this_for)
+      .map(cleanNarrative)
+      .filter((item) => item && item !== UNKNOWN_EVIDENCE),
+    why_is_it_valuable: cleanNarrative(getEvidenceText(rawExecutiveOverview?.why_is_it_valuable)),
+    one_line_summary: cleanNarrative(getEvidenceText(rawExecutiveOverview?.one_line_summary)) !== UNKNOWN_EVIDENCE
+      ? cleanNarrative(getEvidenceText(rawExecutiveOverview?.one_line_summary))
       : overviewSummary,
   };
   const businessModules = (Array.isArray(repo.analysis?.businessModules) ? repo.analysis.businessModules : [])
