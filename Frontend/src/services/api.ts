@@ -334,15 +334,27 @@ function normalizeSearchRepository(value: unknown): SimilarRepo {
       : [],
     stars: Number.isFinite(stars) ? stars : 0,
     forks: Number.isFinite(forks) ? forks : 0,
-    relevance_score: Number.isFinite(Number(repo.relevance_score))
-      ? Number(repo.relevance_score)
+    relevance_score: typeof repo.relevance_score === 'number' && Number.isFinite(repo.relevance_score)
+      ? repo.relevance_score
       : undefined,
-    analyzability_score: Number.isFinite(Number(repo.analyzability_score))
-      ? Number(repo.analyzability_score)
+    analyzability_score: repo.analyzability_score === null
+      ? null
+      : typeof repo.analyzability_score === 'number' && Number.isFinite(repo.analyzability_score)
+        ? repo.analyzability_score
       : undefined,
-    ranking_score: Number.isFinite(Number(repo.ranking_score))
-      ? Number(repo.ranking_score)
+    ranking_score: repo.ranking_score === null
+      ? null
+      : typeof repo.ranking_score === 'number' && Number.isFinite(repo.ranking_score)
+        ? repo.ranking_score
       : undefined,
+    tree_inspection_state: asString(repo.tree_inspection_state),
+    tree_truncated: typeof repo.tree_truncated === 'boolean' ? repo.tree_truncated : undefined,
+    evidence_readiness: asString(repo.evidence_readiness),
+    readiness_reason: asString(repo.readiness_reason),
+    repository_type: asString(repo.repository_type),
+    inspected_file_count: typeof repo.inspected_file_count === 'number' ? repo.inspected_file_count : undefined,
+    tree_reported_file_count: typeof repo.tree_reported_file_count === 'number' ? repo.tree_reported_file_count : undefined,
+    meaningful_source_file_count: typeof repo.meaningful_source_file_count === 'number' ? repo.meaningful_source_file_count : undefined,
   };
 }
 

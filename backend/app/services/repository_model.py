@@ -44,7 +44,9 @@ class RepositoryClaim(BaseModel):
     text: str
     state: ClaimState
     confidence: float = Field(ge=0, le=1)
+    model_confidence: float | None = Field(default=None, ge=0, le=1)
     evidence: list[EvidenceReference] = Field(default_factory=list)
+    validation_reasons: list[dict[str, str]] = Field(default_factory=list)
     subject: str = ""
     category: str = "claim"
     target_name: str = ""
@@ -76,6 +78,7 @@ class RepositoryModel(BaseModel):
     evidence_issues: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
     coverage: dict[str, int | str | bool] = Field(default_factory=dict)
+    validation_diagnostics: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_evidence(self):
@@ -94,6 +97,7 @@ class RepositoryModel(BaseModel):
 
     def validate_sources(self, retrieval: "RepositoryRetrieval") -> "RepositoryModel":
         """Verify every cited range and downgrade unsupported or conflicting claims."""
+        claims_before = len(self.claims)
         all_refs = [e for component in self.components for e in component.evidence]
         all_refs += [e for claim in self.claims for e in claim.evidence]
         all_refs += [e for relation in self.relationships for e in relation.evidence]
@@ -101,6 +105,9 @@ class RepositoryModel(BaseModel):
              claim_count=len(self.claims), evidence_reference_count=len(all_refs), component_count=len(self.components),
              relationship_count=len(self.relationships))
         invalid_refs: set[int] = set()
+        original_claim_evidence = {id(claim): bool(claim.evidence) for claim in self.claims}
+        reference_results: dict[int, tuple[bool, str, str]] = {}
+        rejected_references: list[dict[str, object]] = []
         for ref in all_refs:
             try:
                 source = retrieval.read(ref.path, ref.start_line or 1, ref.end_line)
@@ -108,43 +115,70 @@ class RepositoryModel(BaseModel):
                     raise ValueError("Evidence line range is beyond end of file")
                 if ref.excerpt and ref.excerpt.strip() not in source["content"]:
                     raise ValueError("Evidence excerpt does not match source")
-                if ref.start_line and ref.start_line > source["end_line"]:
-                    raise ValueError("Evidence line range is beyond end of file")
+                if not ref.excerpt:
+                    reference_results[id(ref)] = (True, "source_exists_excerpt_not_supplied", source["content"])
+                else:
+                    reference_results[id(ref)] = (True, "verified_excerpt", ref.excerpt)
             except (OSError, ValueError) as exc:
                 invalid_refs.add(id(ref))
-                self.evidence_issues.append(f"{ref.path}: {exc}")
+                error_text = str(exc)
+                reason = (
+                    "invalid_line_range" if "line range" in error_text.casefold()
+                    else "excerpt_mismatch" if "excerpt" in error_text.casefold()
+                    else "path_not_in_repository"
+                )
+                reference_results[id(ref)] = (False, reason, "")
+                self.evidence_issues.append(f"{ref.path}: {error_text}")
+                rejected_references.append({"path": ref.path, "start_line": ref.start_line, "end_line": ref.end_line, "reason_code": reason, "stage": "source_verification"})
                 emit(logger, "evidence_reference_rejected", level=logging.WARNING, stage="evidence_validation",
                      commit_sha=self.commit_sha, path=ref.path, start_line=ref.start_line, end_line=ref.end_line,
-                     reason=str(exc))
+                     reason_code=reason)
 
         for claim in self.claims:
-            if any(id(ref) in invalid_refs for ref in claim.evidence):
-                claim.state = "rejected"
-                claim.confidence = min(claim.confidence, 0.2)
+            claim.model_confidence = claim.model_confidence if claim.model_confidence is not None else claim.confidence
+            source_reasons = [
+                {"reason_code": reference_results[id(ref)][1], "stage": "source_verification", "path": ref.path}
+                for ref in claim.evidence if id(ref) in invalid_refs
+            ]
+            known_reasons = {(reason.get("reason_code"), reason.get("stage"), reason.get("path")) for reason in claim.validation_reasons}
+            claim.validation_reasons.extend(
+                reason for reason in source_reasons
+                if (reason.get("reason_code"), reason.get("stage"), reason.get("path")) not in known_reasons
+            )
+            claim.evidence = [ref for ref in claim.evidence if id(ref) not in invalid_refs]
         for component in self.components:
             component.evidence = [ref for ref in component.evidence if id(ref) not in invalid_refs]
         for relation in self.relationships:
             relation.evidence = [ref for ref in relation.evidence if id(ref) not in invalid_refs]
 
         for claim in self.claims:
-            if claim.state == "rejected":
-                continue
-            try:
-                corpus = " ".join(ref.excerpt if ref.excerpt else retrieval.read(ref.path, ref.start_line or 1, ref.end_line)["content"] for ref in claim.evidence)
-            except (OSError, ValueError):
-                claim.state = "rejected"
-                claim.confidence = min(claim.confidence, 0.2)
-                continue
-            claim_tokens = _content_tokens(claim.text)
-            source_tokens = set(_content_tokens(corpus))
-            overlap = len(set(claim_tokens) & source_tokens) / max(1, len(set(claim_tokens)))
-            if not claim.evidence or overlap < 0.25:
-                claim.state = ("rejected" if overlap == 0 else "inferred") if claim.evidence else "unknown"
-                claim.confidence = min(claim.confidence, 0.2 if overlap == 0 else 0.55) if claim.evidence else 0
-            else:
-                exact_quotes = bool(claim.evidence) and all(ref.excerpt for ref in claim.evidence)
+            supplied = [reference_results[id(ref)][2] for ref in claim.evidence if reference_results.get(id(ref), (False, "", ""))[0] and reference_results[id(ref)][1] == "verified_excerpt"]
+            if any(reference_results.get(id(ref), (False, "", ""))[1] == "source_exists_excerpt_not_supplied" for ref in claim.evidence):
+                claim.validation_reasons.append({"reason_code": "source_not_supplied_to_model", "stage": "source_verification"})
+            corpus = " ".join(supplied)
+            overlap, semantic_signal = _claim_support(claim, corpus)
+            exact_quotes = bool(supplied)
+            if not claim.evidence:
+                if original_claim_evidence.get(id(claim)):
+                    claim.state = "rejected"
+                    claim.confidence = 0.1
+                else:
+                    claim.state = "unknown"
+                    claim.confidence = 0.0
+                    claim.validation_reasons.append({"reason_code": "no_supporting_evidence", "stage": "semantic_validation"})
+            elif not corpus:
+                claim.state = "inferred"
+                claim.confidence = 0.25
+            elif overlap >= 0.25 or semantic_signal:
                 claim.state = "confirmed" if exact_quotes and overlap >= 0.5 else "inferred"
-                claim.confidence = max(claim.confidence, 0.7) if claim.state == "confirmed" else min(claim.confidence, 0.55)
+                evidence_score = 0.65 if exact_quotes and semantic_signal else 0.75 if exact_quotes and overlap >= 0.5 else 0.55
+                claim.confidence = evidence_score
+                if claim.state == "inferred":
+                    claim.validation_reasons.append({"reason_code": "insufficient_semantic_support", "stage": "semantic_validation"})
+            else:
+                claim.state = "rejected"
+                claim.confidence = 0.1
+                claim.validation_reasons.append({"reason_code": "insufficient_semantic_support", "stage": "semantic_validation"})
 
         unique: dict[tuple[str, str], RepositoryClaim] = {}
         for claim in self.claims:
@@ -155,9 +189,12 @@ class RepositoryModel(BaseModel):
                 continue
             previous.evidence = list({(ref.path, ref.start_line, ref.end_line, ref.commit_sha): ref for ref in previous.evidence + claim.evidence}.values())
             previous.confidence = max(previous.confidence, claim.confidence)
+            previous.model_confidence = max(previous.model_confidence or 0, claim.model_confidence or 0)
+            previous.validation_reasons.extend(claim.validation_reasons)
             if claim.state != previous.state:
                 previous.state = "inferred"
                 previous.confidence = min(previous.confidence, claim.confidence, 0.65)
+                previous.validation_reasons.append({"reason_code": "deduplicated_confidence_merge", "stage": "claim_deduplication"})
         self.claims = list(unique.values())
 
         buckets: dict[str, list[int]] = {}
@@ -177,7 +214,18 @@ class RepositoryModel(BaseModel):
                     claim = self.claims[index]
                     claim.state = "inferred"
                     claim.confidence = min(claim.confidence, 0.49)
+                    claim.validation_reasons.append({"reason_code": "contradictory_evidence", "stage": "contradiction_detection"})
         state_counts = {state: sum(claim.state == state for claim in self.claims) for state in ("confirmed", "inferred", "unknown", "rejected")}
+        self.validation_diagnostics = {
+            "stage": "source_and_semantic_validation",
+            "claims_before": claims_before,
+            "claims_after": len(self.claims),
+            "evidence_references_before": len(all_refs),
+            "evidence_references_after": sum(len(claim.evidence) for claim in self.claims) + sum(len(component.evidence) for component in self.components) + sum(len(relation.evidence) for relation in self.relationships),
+            "rejected_references": rejected_references,
+            "claim_state_counts": state_counts,
+            "reason_counts": dict(Counter(reason["reason_code"] for claim in self.claims for reason in claim.validation_reasons)),
+        }
         emit(logger, "evidence_validation_completed", stage="evidence_validation", commit_sha=self.commit_sha,
              claim_state_counts=state_counts, evidence_issue_count=len(self.evidence_issues),
              contradiction_count=len(self.contradictions), deduplicated_claim_count=len(self.claims))
@@ -198,6 +246,46 @@ def _content_tokens(value: str) -> list[str]:
         "rely", "maintain", "run", "system", "platform",
     }
     return [word for word in re.findall(r"[a-z0-9_]{3,}", value.casefold()) if word not in ignored]
+
+
+_BEHAVIOR_CONCEPTS = (
+    {"upload", "uploaded", "uploads", "download", "downloads", "receive", "receives", "file"},
+    {"save", "saved", "store", "stored", "persist", "persists", "write", "writes", "insert", "create"},
+    {"authenticate", "authentication", "login", "signin", "authorize", "authorization", "token", "session"},
+    {"route", "routes", "endpoint", "handler", "request", "controller", "dispatch"},
+    {"publish", "publisher", "emit", "send", "enqueue", "queue", "message", "event"},
+    {"query", "select", "fetch", "retrieve", "lookup", "read", "load"},
+    {"delete", "remove", "destroy", "purge", "clear"},
+)
+
+
+def _claim_support(claim: RepositoryClaim, corpus: str) -> tuple[float, bool]:
+    """Measure lexical support and conservative implementation-level concepts."""
+    claim_tokens = set(_content_tokens(claim.text))
+    source_tokens = set(_content_tokens(corpus))
+    if not claim_tokens or not source_tokens:
+        return 0.0, False
+    overlap = len(claim_tokens & source_tokens) / len(claim_tokens)
+    matching_concepts = [group for group in _BEHAVIOR_CONCEPTS if claim_tokens.intersection(group)]
+    source_concepts = [group for group in _BEHAVIOR_CONCEPTS if source_tokens.intersection(group)]
+    semantic_signal = bool(matching_concepts and any(group in source_concepts for group in matching_concepts))
+    concept_pairs = (
+        ({"upload", "uploaded", "uploads", "download", "downloads", "receive", "receives", "file"}, {"save", "saved", "store", "stored", "persist", "persists", "write", "writes", "insert", "create"}),
+        ({"authenticate", "authentication", "login", "signin", "authorize", "authorization"}, {"token", "session", "credential", "password", "jwt"}),
+        ({"route", "routes", "endpoint", "handler", "request", "controller", "dispatch"}, {"call", "calls", "invoke", "invokes", "send", "sends"}),
+    )
+    semantic_signal = semantic_signal or any(
+        bool(claim_tokens.intersection(left) and source_tokens.intersection(right))
+        or bool(claim_tokens.intersection(right) and source_tokens.intersection(left))
+        for left, right in concept_pairs
+    )
+    implementation_markers = bool(re.search(
+        r"\b(def|function|async|return|await|import|from|router\.|app\.|@\w+|\.save\(|\.create\(|\.insert\(|\.execute\(|\.publish\(|\.send\()",
+        corpus,
+        re.IGNORECASE,
+    ))
+    semantic_signal = semantic_signal and implementation_markers
+    return overlap, semantic_signal
 
 
 def _claim_subject(text: str) -> str:
@@ -230,7 +318,24 @@ class RepositoryRetrieval:
         lexical = self.root / relative
         if any(part.is_symlink() for part in (lexical, *lexical.parents) if part != self.root.parent):
             raise ValueError("Symlinks are not valid evidence paths")
-        candidate = lexical.resolve()
+        candidate = lexical
+        if not candidate.exists():
+            # Git paths are case-sensitive even when a checkout is on a
+            # case-insensitive platform. Resolve each component without
+            # accepting ambiguous case-folded matches.
+            current = self.root
+            for part in PurePosixPath(relative).parts:
+                if current.is_dir():
+                    matches = [child for child in current.iterdir() if child.name.casefold() == part.casefold()]
+                    if len(matches) != 1:
+                        break
+                    if matches[0].is_symlink():
+                        raise ValueError("Symlinks are not valid evidence paths")
+                    current = matches[0]
+                else:
+                    break
+            candidate = current
+        candidate = candidate.resolve()
         if not candidate.is_relative_to(self.root):
             raise ValueError("Unsafe repository path")
         return candidate
@@ -396,7 +501,7 @@ class RepositoryRetrieval:
         return result
 
 
-def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commit_sha: str) -> RepositoryModel:
+def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commit_sha: str, coverage_manifest: dict | None = None) -> RepositoryModel:
     """Build the canonical evidence ledger from the one normalized analysis response."""
     emit(logger, "repository_model_build_started", stage="repository_model", commit_sha=commit_sha,
          input_module_count=len(analysis.get("modules", [])) if isinstance(analysis.get("modules"), list) else 0,
@@ -408,15 +513,33 @@ def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commi
     evidence_issues: list[str] = []
     by_name: dict[str, FunctionalComponent] = {}
 
+    supplied_by_path = {
+        str(item.get("path") or "").replace("\\", "/").casefold(): item
+        for item in (coverage_manifest or {}).get("files", [])
+        if isinstance(item, dict)
+    }
+
     def refs_for(paths: list[str]) -> list[EvidenceReference]:
         refs = []
         for path in dict.fromkeys(paths):
+            normalized_path = path.replace("\\", "/").casefold()
+            manifest_entry = supplied_by_path.get(normalized_path)
+            if coverage_manifest is not None and manifest_entry is None:
+                evidence_issues.append(f"{path}: path_not_in_manifest")
+                continue
+            if manifest_entry is not None and "gemini_supplied_line_ranges" in manifest_entry and not manifest_entry.get("gemini_supplied_line_ranges"):
+                evidence_issues.append(f"{path}: partial_source_coverage")
+                continue
             try:
-                source = retrieval.read(path)
+                manifest_entry = manifest_entry or {}
+                ranges = manifest_entry.get("gemini_supplied_line_ranges") or []
+                bounds = ranges[0] if ranges and isinstance(ranges[0], dict) else {}
+                start, end = bounds.get("start_line"), bounds.get("end_line")
+                source = retrieval.read(path, start or 1, end)
             except (OSError, ValueError):
                 evidence_issues.append(f"{path}: referenced source is missing, unsafe, or outside retrieval limits")
                 continue
-            refs.append(EvidenceReference(path=path, start_line=source["start_line"], end_line=source["end_line"], commit_sha=commit_sha))
+            refs.append(EvidenceReference(path=path, start_line=source["start_line"], end_line=source["end_line"], commit_sha=commit_sha, excerpt=source["content"] if start and end else None))
         return refs
 
     for module in modules:
@@ -448,7 +571,7 @@ def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commi
                 refs.append(EvidenceReference(path=path, start_line=item.get("start_line"), end_line=item.get("end_line"), commit_sha=commit_sha, excerpt=item.get("excerpt")))
             except Exception:
                 continue
-        claims.append(RepositoryClaim(text=str(raw["text"]).strip(), subject=str(raw.get("subject") or ""), category=str(raw.get("category") or "claim"), target_name=str(raw.get("target_name") or ""), state="inferred", confidence=min(0.8, max(0.0, float(raw.get("confidence", 0.5)))), evidence=refs))
+        claims.append(RepositoryClaim(text=str(raw["text"]).strip(), subject=str(raw.get("subject") or ""), category=str(raw.get("category") or "claim"), target_name=str(raw.get("target_name") or ""), state="inferred", confidence=min(0.8, max(0.0, float(raw.get("confidence", 0.5)))), model_confidence=raw.get("model_confidence", raw.get("confidence", 0.5)), validation_reasons=list(raw.get("validation_reasons") or []), evidence=refs))
 
     for module in modules:
         if not isinstance(module, dict):
@@ -477,7 +600,7 @@ def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commi
             except (KeyError, TypeError, ValueError) as exc:
                 model.evidence_issues.append(f"Invalid claim evidence record: {exc}")
         try:
-            model.claims.append(RepositoryClaim(text=str(item["text"]), subject=str(item.get("subject") or ""), category=str(item.get("category") or "claim"), target_name=str(item.get("target_name") or ""), state="inferred", confidence=float(item.get("confidence", 0.5)), evidence=refs))
+            model.claims.append(RepositoryClaim(text=str(item["text"]), subject=str(item.get("subject") or ""), category=str(item.get("category") or "claim"), target_name=str(item.get("target_name") or ""), state="inferred", confidence=float(item.get("confidence", 0.5)), model_confidence=item.get("model_confidence", item.get("confidence", 0.5)), validation_reasons=list(item.get("validation_reasons") or []), evidence=refs))
         except (TypeError, ValueError) as exc:
             model.evidence_issues.append(f"Invalid claim record: {exc}")
     model = model.validate_sources(retrieval)

@@ -22,7 +22,6 @@ from app.services.github_service import GitHubService, get_github_service
 from app.services.stack_detector import StackDetector
 from app.services.repository_structure_service import RepositoryStructureService
 from app.services.llm_service import LLMService
-from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.similar_repo_service import SimilarRepoService
 from app.utils.repo_scanner import RepoScanner
 from app.utils.git_utils import normalize_github_url
@@ -33,6 +32,19 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 UNKNOWN_EVIDENCE_MESSAGE = "Unable to confidently determine from repository evidence."
+_SEMANTIC_TERM_GROUPS = (
+    {"checkout", "purchase", "purchases", "buy", "order", "orders"},
+    {"catalog", "catalogue", "product", "products", "item", "items"},
+    {"upload", "uploaded", "uploads", "download", "file", "files", "document"},
+    {"persist", "persistence", "save", "store", "storage", "write", "database"},
+    {"login", "signin", "authenticate", "authentication", "identity", "credential"},
+)
+
+
+def _semantically_related_tokens(left: set[str], right: set[str]) -> bool:
+    if left & right:
+        return True
+    return any(bool(left & group) and bool(right & group) for group in _SEMANTIC_TERM_GROUPS)
 
 
 def _normalise_text(value: Any) -> str:
@@ -52,11 +64,32 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _narrative_count(executive: Any) -> int:
+    data = _as_dict(executive)
+    count = 0
+    for key in ("what_is_this_project", "typical_use_cases", "who_is_this_for"):
+        value = data.get(key)
+        count += len(value) if isinstance(value, list) else int(bool(value.strip())) if isinstance(value, str) else 0
+    for key in ("why_was_it_built", "why_is_it_valuable", "one_line_summary"):
+        count += int(bool(str(data.get(key) or "").strip()))
+    return count
+
+
+def _run_output_filter(operation, *args):
+    try:
+        return operation(*args)
+    except Exception as exc:
+        emit(logger, "analysis_output_filtering_failed", level=logging.ERROR,
+             stage="output_filtering", operation=getattr(operation, "__name__", "unknown"),
+             exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
+        raise RuntimeError("output_filtering_failure") from exc
+
+
 def _filter_claims_by_coverage(claims: list, manifest: dict) -> list:
     inspected = {
-        str(item.get("path"))
+        str(item.get("path")).replace("\\", "/").casefold(): item
         for item in _as_list(manifest.get("files"))
-        if isinstance(item, dict) and item.get("status") == "inspected"
+        if isinstance(item, dict) and item.get("status") in {"inspected", "fully_inspected", "partially_inspected"}
     }
     filtered = []
     for claim in claims:
@@ -64,10 +97,31 @@ def _filter_claims_by_coverage(claims: list, manifest: dict) -> list:
             continue
         item = dict(claim)
         refs = _as_list(item.get("evidence"))
-        item["evidence"] = [
-            ref for ref in refs
-            if isinstance(ref, dict) and str(ref.get("path") or "") in inspected
-        ]
+        valid_refs = []
+        reasons = list(_as_list(item.get("validation_reasons")))
+        for ref in refs:
+            if not isinstance(ref, dict):
+                reasons.append({"reason_code": "invalid_schema", "stage": "coverage_filter"})
+                continue
+            path = str(ref.get("path") or "").replace("\\", "/")
+            entry = inspected.get(path.casefold())
+            if entry is None:
+                reasons.append({"reason_code": "path_not_in_manifest", "stage": "coverage_filter", "path": path})
+                continue
+            supplied_ranges = _as_list(entry.get("gemini_supplied_line_ranges"))
+            start, end = ref.get("start_line"), ref.get("end_line")
+            if "gemini_supplied_line_ranges" in entry and not any(
+                isinstance(bounds, dict)
+                and isinstance(start, int) and isinstance(end, int)
+                and start >= int(bounds.get("start_line") or 1)
+                and end <= int(bounds.get("end_line") or 0)
+                for bounds in supplied_ranges
+            ):
+                reasons.append({"reason_code": "partial_source_coverage", "stage": "coverage_filter", "path": path})
+                continue
+            valid_refs.append(ref)
+        item["evidence"] = valid_refs
+        item["validation_reasons"] = reasons
         if refs and not item["evidence"]:
             try:
                 item["confidence"] = min(float(item.get("confidence") or 0), 0.2)
@@ -79,9 +133,9 @@ def _filter_claims_by_coverage(claims: list, manifest: dict) -> list:
 
 def _validate_report_recommendations(report: dict, retrieval: RepositoryRetrieval, manifest: dict) -> dict:
     inspected = {
-        str(item.get("path"))
+        str(item.get("path")).replace("\\", "/").casefold(): item
         for item in _as_list(manifest.get("files"))
-        if isinstance(item, dict) and item.get("status") == "inspected"
+        if isinstance(item, dict) and item.get("status") in {"inspected", "fully_inspected", "partially_inspected"}
     }
     validated = dict(report)
     recommendations = []
@@ -89,23 +143,41 @@ def _validate_report_recommendations(report: dict, retrieval: RepositoryRetrieva
         if not isinstance(recommendation, dict):
             continue
         valid_refs = []
+        rejected_refs = []
         for reference in _as_list(recommendation.get("evidence")):
             if not isinstance(reference, dict):
+                rejected_refs.append({"reason_code": "invalid_schema", "stage": "recommendation_validation"})
                 continue
-            path = str(reference.get("path") or "")
+            path = str(reference.get("path") or "").replace("\\", "/")
+            entry = inspected.get(path.casefold())
             start = reference.get("start_line")
             end = reference.get("end_line")
             excerpt = str(reference.get("excerpt") or "")
-            if path not in inspected or not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+            if entry is None:
+                rejected_refs.append({"reason_code": "path_not_in_manifest", "stage": "recommendation_validation", "path": path})
+                continue
+            if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+                rejected_refs.append({"reason_code": "invalid_line_range", "stage": "recommendation_validation", "path": path})
+                continue
+            supplied_ranges = _as_list(entry.get("gemini_supplied_line_ranges"))
+            if "gemini_supplied_line_ranges" in entry and not any(
+                isinstance(bounds, dict)
+                and start >= int(bounds.get("start_line") or 1)
+                and end <= int(bounds.get("end_line") or 0)
+                for bounds in supplied_ranges
+            ):
+                rejected_refs.append({"reason_code": "partial_source_coverage", "stage": "recommendation_validation", "path": path})
                 continue
             try:
                 source = retrieval.read(path, start, end)
                 if end <= source["end_line"] and excerpt and excerpt in source["content"]:
                     valid_refs.append(reference)
+                else:
+                    rejected_refs.append({"reason_code": "excerpt_mismatch", "stage": "recommendation_validation", "path": path})
             except (OSError, ValueError):
-                continue
+                rejected_refs.append({"reason_code": "path_not_in_repository", "stage": "recommendation_validation", "path": path})
         if valid_refs:
-            recommendations.append({**recommendation, "evidence": valid_refs})
+            recommendations.append({**recommendation, "evidence": valid_refs, "validation_reasons": rejected_refs})
     validated["recommendations"] = recommendations
     return validated
 
@@ -128,9 +200,10 @@ def _claim_supports_label(label: str, claims: list) -> bool:
     if not normalized_label:
         return False
 
+    generic = {"api", "service", "system", "module", "component", "application", "backend", "frontend", "layer", "data", "flow", "architecture", "repository", "process"}
     label_tokens = {
         token for token in re.findall(r"[a-z0-9_+#.-]+", normalized_label)
-        if len(token) > 2
+        if len(token) > 2 and token not in generic
     }
     if not label_tokens:
         return False
@@ -141,6 +214,8 @@ def _claim_supports_label(label: str, claims: list) -> bool:
         claim_text = _normalise_text(getattr(claim, "text", ""))
         claim_target = _normalise_text(getattr(claim, "target_name", ""))
         claim_subject = _normalise_text(getattr(claim, "subject", ""))
+        if not getattr(claim, "evidence", []):
+            continue
 
         if (
             normalized_label in claim_text
@@ -153,8 +228,10 @@ def _claim_supports_label(label: str, claims: list) -> bool:
             token for token in re.findall(r"[a-z0-9_+#.-]+", claim_text)
             if len(token) > 2
         }
-        # Require all meaningful label tokens, not a single generic word.
-        if label_tokens and label_tokens.issubset(claim_tokens):
+        # A single distinctive token is enough to associate an entry with an
+        # independently source-verified claim; requiring every noun phrase
+        # token loses valid labels such as "order persistence service".
+        if label_tokens and _semantically_related_tokens(label_tokens, claim_tokens):
             return True
 
     return False
@@ -173,17 +250,12 @@ def _filter_architecture(
     one architecture claim is usable.
     """
     source = _as_dict(architecture)
-    architecture_categories = {
-        "architecture",
-        "data_flow",
-        "integration",
-        "deployment",
-    }
     usable_architecture_claims = [
         claim for claim in claims
         if _claim_is_usable(claim)
+        and bool(getattr(claim, "evidence", []))
         and str(getattr(claim, "category", "") or "").casefold()
-        in architecture_categories
+        in {"architecture", "data_flow", "integration", "deployment", "module", "feature", "component", "flow", "relationship", "infrastructure"}
     ]
 
     if not usable_architecture_claims:
@@ -199,6 +271,11 @@ def _filter_architecture(
         }
 
     filtered = dict(source)
+    summary = str(source.get("architecture_summary") or source.get("summary") or "").strip()
+    if summary:
+        supported_summary = _filter_narrative_sentences(summary, usable_architecture_claims)
+        filtered["architecture_summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
+        filtered["summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
 
     # Component-level validation: do not keep every component merely because
     # another architecture claim passed validation.
@@ -335,7 +412,7 @@ def _narrative_supported_by_claims(text: Any, claims: list) -> bool:
         }
 
     narrative_tokens = tokens(text)
-    if len(narrative_tokens) < 2:
+    if not narrative_tokens:
         return False
     claim_tokens = set().union(*(
         tokens(claim.text)
@@ -344,8 +421,15 @@ def _narrative_supported_by_claims(text: Any, claims: list) -> bool:
         and str(getattr(claim, "category", "") or "").casefold()
         in {"overview", "executive_summary"}
     )) if claims else set()
-    shared = narrative_tokens & claim_tokens
-    return len(shared) >= 2 and len(shared) / len(narrative_tokens) >= 0.3
+    return _semantically_related_tokens(narrative_tokens, claim_tokens)
+
+
+def _filter_narrative_sentences(text: Any, claims: list) -> str:
+    """Keep supported sentences independently so one unsupported clause cannot erase a section."""
+    if not isinstance(text, str):
+        return ""
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
+    return " ".join(sentence for sentence in sentences if _narrative_supported_by_claims(sentence, claims))
 
 
 @router.post("", response_model=AnalyzeResponse)
@@ -682,10 +766,26 @@ def _run_analysis(
             coverage_manifest = _as_dict(
                 ai_analysis["analysis_evidence"].get("coverage_manifest")
             )
+        claims_before_coverage_filter = len(ai_analysis["claims"])
+        claims_before_coverage = claims_before_coverage_filter
+        evidence_refs_before_filter = sum(
+            len(_as_list(claim.get("evidence"))) for claim in ai_analysis["claims"] if isinstance(claim, dict)
+        )
         if coverage_manifest:
-            ai_analysis["claims"] = _filter_claims_by_coverage(
+            ai_analysis["claims"] = _run_output_filter(_filter_claims_by_coverage,
                 ai_analysis["claims"], coverage_manifest
             )
+        evidence_refs_after_filter = sum(
+            len(_as_list(claim.get("evidence"))) for claim in ai_analysis["claims"] if isinstance(claim, dict)
+        )
+        recommendations_before_filter = len(_as_list(ai_analysis["report_sections"].get("recommendations")))
+        modules_before_filter = len(ai_analysis["modules"])
+        features_before_filter = len(_as_list(ai_analysis["executive_overview"].get("user_features")))
+        architecture_before = _as_dict(ai_analysis.get("architecture"))
+        architecture_components_before_filter = len(_as_list(architecture_before.get("components")))
+        architecture_flow_before_filter = sum(len(_as_list(architecture_before.get(field))) for field in ("flow", "request_lifecycle", "communication"))
+        overview_before_filter = bool(str(ai_analysis.get("overview") or "").strip())
+        narratives_before_filter = _narrative_count(ai_analysis["executive_overview"]) + int(overview_before_filter)
 
         analysis_status = ai_analysis.get("analysis_status", "degraded")
         if analysis_status not in {"ai_generated", "partial", "degraded"}:
@@ -694,14 +794,26 @@ def _run_analysis(
         model_started = time.perf_counter()
         source_retrieval = RepositoryRetrieval(repo_path)
         if ai_analysis["report_sections"]:
-            ai_analysis["report_sections"] = _validate_report_recommendations(
+            ai_analysis["report_sections"] = _run_output_filter(_validate_report_recommendations,
                 ai_analysis["report_sections"], source_retrieval, coverage_manifest
             )
         repository_model = build_repository_model(
             ai_analysis,
             source_retrieval,
             commit_sha,
+            coverage_manifest,
         )
+        pipeline_diagnostics = ai_analysis["analysis_evidence"].setdefault("pipeline_diagnostics", {})
+        if not isinstance(pipeline_diagnostics, dict):
+            pipeline_diagnostics = {}
+            ai_analysis["analysis_evidence"]["pipeline_diagnostics"] = pipeline_diagnostics
+        pipeline_diagnostics["evidence_validation"] = {
+            "status": "partial" if repository_model.evidence_issues or any(claim.state == "rejected" for claim in repository_model.claims) else "passed",
+            "code": "evidence_validation_partial" if repository_model.evidence_issues or any(claim.state == "rejected" for claim in repository_model.claims) else "ok",
+            "invalid_reference_count": len(repository_model.evidence_issues),
+            "rejected_claim_count": sum(claim.state == "rejected" for claim in repository_model.claims),
+            **repository_model.validation_diagnostics,
+        }
 
         if analysis_status == "degraded":
             repository_model.unresolved_questions = [
@@ -786,7 +898,7 @@ def _run_analysis(
                 and claim.state in {"confirmed", "inferred"}
                 and claim.target_name
             }
-            executive = _filter_executive_overview(
+            executive = _run_output_filter(_filter_executive_overview,
                 ai_analysis["executive_overview"],
                 valid_features,
             )
@@ -806,35 +918,25 @@ def _run_analysis(
                 executive["typical_use_cases"] = []
                 executive["who_is_this_for"] = []
             else:
-                ai_analysis["overview"] = (
-                    ai_analysis.get("overview", "")
-                    if _narrative_supported_by_claims(
-                        ai_analysis.get("overview", ""), valid_overview_claims
-                    )
-                    else ""
+                ai_analysis["overview"] = _filter_narrative_sentences(
+                    ai_analysis.get("overview", ""), valid_overview_claims
                 )
                 executive["what_is_this_project"] = [
-                    item for item in _as_list(
-                        executive.get("what_is_this_project")
-                    )
-                    if _narrative_supported_by_claims(item, valid_overview_claims)
+                    retained for item in _as_list(executive.get("what_is_this_project"))
+                    if (retained := _filter_narrative_sentences(item, valid_overview_claims))
                 ]
                 for field in (
                     "why_was_it_built", "why_is_it_valuable", "one_line_summary"
                 ):
                     value = executive.get(field)
-                    if not _narrative_supported_by_claims(value, valid_overview_claims):
-                        executive[field] = UNKNOWN_EVIDENCE_MESSAGE
-                executive["typical_use_cases"] = [
-                    item for item in _as_list(executive.get("typical_use_cases"))
-                    if _narrative_supported_by_claims(item, valid_overview_claims)
-                ]
-                executive["who_is_this_for"] = [
-                    item for item in _as_list(executive.get("who_is_this_for"))
-                    if _narrative_supported_by_claims(item, valid_overview_claims)
-                ]
+                    executive[field] = _filter_narrative_sentences(value, valid_overview_claims) or UNKNOWN_EVIDENCE_MESSAGE
+                for field in ("typical_use_cases", "who_is_this_for"):
+                    executive[field] = [
+                        retained for item in _as_list(executive.get(field))
+                        if (retained := _filter_narrative_sentences(item, valid_overview_claims))
+                    ]
 
-            ai_analysis["architecture"] = _filter_architecture(
+            ai_analysis["architecture"] = _run_output_filter(_filter_architecture,
                 ai_analysis.get("architecture"),
                 repository_model.claims,
             )
@@ -852,7 +954,66 @@ def _run_analysis(
                 and _normalise_text(relation.target) in kept
             ]
 
+        recommendations_after_filter = len(_as_list(ai_analysis["report_sections"].get("recommendations")))
+        architecture_after = _as_dict(ai_analysis.get("architecture"))
+        architecture_components_after = len(_as_list(architecture_after.get("components")))
+        architecture_flow_after = sum(len(_as_list(architecture_after.get(field))) for field in ("flow", "request_lifecycle", "communication"))
+        narratives_after_filter = _narrative_count(ai_analysis["executive_overview"]) + int(bool(str(ai_analysis.get("overview") or "").strip()))
+        validation_reason_counts = {}
+        for claim in repository_model.claims:
+            for reason in claim.validation_reasons:
+                code = reason.get("reason_code")
+                if code:
+                    validation_reason_counts[code] = validation_reason_counts.get(code, 0) + 1
+        filtering_counts = {
+            "claim_evidence_references_removed": max(0, evidence_refs_before_filter - evidence_refs_after_filter),
+            "recommendations_removed": max(0, recommendations_before_filter - recommendations_after_filter),
+            "modules_removed": max(0, modules_before_filter - len(ai_analysis["modules"])),
+            "features_removed": max(0, features_before_filter - len(_as_list(ai_analysis["executive_overview"].get("user_features")))),
+            "architecture_components_removed": max(0, architecture_components_before_filter - architecture_components_after),
+            "architecture_flow_entries_removed": max(0, architecture_flow_before_filter - architecture_flow_after),
+            "overview_removed": int(overview_before_filter and not bool(str(ai_analysis.get("overview") or "").strip())),
+            "narratives_removed": max(0, narratives_before_filter - narratives_after_filter),
+        }
+        recommendation_reason_counts = {}
+        for recommendation in _as_list(ai_analysis["report_sections"].get("recommendations")):
+            if not isinstance(recommendation, dict):
+                continue
+            for reason in _as_list(recommendation.get("validation_reasons")):
+                if isinstance(reason, dict) and reason.get("reason_code"):
+                    code = str(reason["reason_code"])
+                    recommendation_reason_counts[code] = recommendation_reason_counts.get(code, 0) + 1
+        pipeline_diagnostics["output_filtering"] = {
+            "status": "filtered" if any(filtering_counts.values()) else "passed",
+            "code": "unsupported_or_unverified_output_removed" if any(filtering_counts.values()) else "ok",
+            "stages": {
+                "coverage_filter": {"claims_before": claims_before_coverage, "claims_after": len(ai_analysis["claims"]), "evidence_references_before": evidence_refs_before_filter, "evidence_references_after": evidence_refs_after_filter},
+                "recommendation_validation": {"before": recommendations_before_filter, "after": recommendations_after_filter},
+                "module_validation": {"before": modules_before_filter, "after": len(ai_analysis["modules"])},
+                "feature_validation": {"before": features_before_filter, "after": len(_as_list(ai_analysis["executive_overview"].get("user_features")))},
+                "architecture_validation": {"components_before": architecture_components_before_filter, "components_after": architecture_components_after, "flow_entries_before": architecture_flow_before_filter, "flow_entries_after": architecture_flow_after},
+                "overview_validation": {"before": int(overview_before_filter), "after": int(bool(str(ai_analysis.get("overview") or "").strip()))},
+                "narrative_validation": {"before": narratives_before_filter, "after": narratives_after_filter},
+            },
+            "reason_counts": {
+                **validation_reason_counts,
+                **recommendation_reason_counts,
+                **({"unsupported_architecture_relationship": filtering_counts["architecture_components_removed"] + filtering_counts["architecture_flow_entries_removed"]} if filtering_counts["architecture_components_removed"] + filtering_counts["architecture_flow_entries_removed"] else {}),
+                **({"insufficient_semantic_support": filtering_counts["narratives_removed"]} if filtering_counts["narratives_removed"] else {}),
+            },
+            **filtering_counts,
+        }
+        gate = pipeline_diagnostics.get("coverage", {})
+        manifest_gate = _as_dict(coverage_manifest.get("coverage"))
+        if manifest_gate.get("status") == "partial" or (isinstance(gate, dict) and gate.get("status") == "partial"):
+            if analysis_status == "ai_generated":
+                analysis_status = "partial"
+            repository_model.coverage["status"] = analysis_status
+
         ai_analysis["analysis_status"] = analysis_status
+        pipeline_diagnostics["status"] = analysis_status
+        pipeline_diagnostics["analysis_run_id"] = payload.analysis_run_id
+        pipeline_diagnostics["commit_sha"] = commit_sha
 
         emit(
             logger,
@@ -882,6 +1043,8 @@ def _run_analysis(
                         "category": claim.category,
                         "target_name": claim.target_name,
                         "confidence": claim.confidence,
+                        "model_confidence": claim.model_confidence,
+                        "validation_reasons": claim.validation_reasons,
                         "evidence": [
                             {
                                 "path": ref.path,
@@ -900,12 +1063,8 @@ def _run_analysis(
             },
         )
 
-        semantic_repository_profile = build_semantic_repository_profile(
-            repository_metadata,
-            readme_content or "",
-            stack,
-            scan,
-            llm_service._extract_code_signals(scan),
+        semantic_repository_profile = ai_analysis["analysis_evidence"].get(
+            "semantic_repository_profile", {}
         )
 
         try:
@@ -1093,6 +1252,7 @@ def _run_analysis(
             analysis_evidence=ai_analysis.get("analysis_evidence"),
             ai_insights=ai_insights,
             analysis_status=analysis_status,
+            error_code=ai_analysis.get("analysis_error") if ai_analysis.get("analysis_error") else None,
             commit_sha=commit_sha,
             repository_model=repository_model.model_dump(mode="json"),
             coverage_manifest=coverage_manifest or None,
@@ -1145,7 +1305,7 @@ def _run_analysis(
         return AnalyzeResponse(
             status="error",
             analysis_status="error",
-            error_code="analysis_runtime_failed",
+            error_code="output_filtering_failure" if "output_filtering_failure" in str(exc) else "analysis_runtime_failed",
             message=(
                 "Analysis could not complete. Use correlation ID "
                 f"{payload.analysis_run_id} for diagnostics."

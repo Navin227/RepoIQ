@@ -1,10 +1,13 @@
 import logging
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.llm_service import LLMService
+from app.services import llm_service as llm_service_module
+from app.services import analysis_context
 from app.services.similar_repo_service import SimilarRepoService
 
 
@@ -90,7 +93,7 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
     assert analysis["architecture"]["flow"] == ["User", "Frontend", "API Layer", "Worker", "Storage"]
 
 
-def test_llm_service_falls_back_when_gemini_fails(monkeypatch):
+def test_llm_service_reports_gemini_provider_failure_without_successful_analysis(monkeypatch):
     def failing_gemini(self, payload):
         raise RuntimeError("quota exceeded")
 
@@ -119,6 +122,8 @@ def test_llm_service_falls_back_when_gemini_fails(monkeypatch):
 
     assert analysis["overview"] == ""
     assert analysis["analysis_status"] == "degraded"
+    assert analysis["analysis_error"] == "gemini_provider_failure"
+    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "failed"
     assert analysis["modules"] == []
     assert analysis["executive_overview"] is None
     assert {"summary", "flow"} <= set(analysis["architecture"])
@@ -220,6 +225,8 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     assert "stack" in body
     assert "folder_structure" in body
     assert body["similar_repositories"][0]["fullName"] == "appwrite/appwrite"
+    assert "stages" in body["analysis_evidence"]["pipeline_diagnostics"]["output_filtering"]
+    assert "validation_diagnostics" in body["repository_model"]
 
 
 def test_repo_scanner_finds_nested_readme(tmp_path):
@@ -341,7 +348,8 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
         },
     )
 
-    assert analysis["analysis_status"] == "ai_generated"
+    assert analysis["analysis_status"] == "partial"
+    assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini_output"]["missing_fields"]
     assert analysis["ai_insights"] == []
 
 
@@ -409,6 +417,23 @@ def test_llm_service_drops_architecture_components_without_repo_evidence():
     assert [component["name"] for component in analysis["architecture"]["components"]] == ["API Gateway"]
 
 
+def test_generic_named_module_with_strong_source_evidence_is_retained():
+    service = LLMService()
+    payload = {
+        "file_tree": ["src/orders.py"],
+        "top_level_modules": ["src"],
+        "analysis_evidence": {"source_files": ["src/orders.py"]},
+    }
+    analysis = service._normalize_analysis({
+        "overview": "Order management.",
+        "modules": [{"name": "Service", "purpose": "Creates and persists orders.", "components": ["src/orders.py"], "confidence": 10}],
+        "architecture": {},
+    }, payload)
+
+    assert analysis["modules"][0]["name"] == "Service"
+    assert analysis["modules"][0]["model_confidence"] == 10
+
+
 def test_duplicate_features_are_deduplicated_by_name():
     service = LLMService()
     payload = {
@@ -424,3 +449,124 @@ def test_duplicate_features_are_deduplicated_by_name():
         ]
     }, payload)
     assert [feature["name"] for feature in normalized["user_features"]] == ["Upload files"]
+
+
+def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("from service import run\nif __name__ == '__main__': run()\n", encoding="utf-8")
+    (tmp_path / "service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+    monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
+    gemma_calls = []
+    def fake_gemma(*args):
+        gemma_calls.append(args)
+        return json.dumps({"purpose": "prepared map", "evidence_paths": ["main.py", "service.py"]})
+    monkeypatch.setattr(analysis_context, "_chat", fake_gemma)
+    captured = {}
+
+    def fake_gemini(self, payload):
+        captured.update(payload)
+        return json.dumps({
+            "overview": "A verified Python application.", "executive_overview": {}, "claims": [], "modules": [],
+            "architecture": {}, "report_sections": {"recommendations": [], "limitations": []}, "investigation_requests": [],
+        })
+
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    result = LLMService().generate_repository_analysis(
+        metadata={"full_name": "owner/project", "analysis_run_id": "run_context_handoff", "commit_sha": "abc"},
+        readme="", stack={}, repository_structure=[], scan={"files": ["main.py", "service.py"], "dependencies": {}, "source_evidence": {}}, repo_path=tmp_path,
+    )
+    assert captured["context_bundle"]["repository_map"]["purpose"] == "prepared map"
+    assert captured["context_bundle"]["commit_sha"] == "abc"
+    assert captured["analysis_run_id"] == "run_context_handoff"
+    assert {item["path"] for item in captured["context_bundle"]["source_excerpts"]} == {"main.py", "service.py"}
+    assert len(gemma_calls) == 1
+    assert "deterministic_context" not in captured["context_bundle"]
+    assert "coverage_manifest" not in captured
+    assert result["analysis_evidence"]["pipeline_diagnostics"]["gemma"]["status"] == "completed"
+    assert result["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "completed"
+    assert result["analysis_status"] == "ai_generated"
+
+
+def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():
+    bundle = {
+        "coverage_manifest": {"files": [
+            {"path": "main.py", "roles": ["entry_point"], "important_to_execution_path": True, "execution_path_distance": 0},
+            {"path": "docs/example.py", "roles": [], "important_to_execution_path": False},
+        ]},
+        "coverage_gate": {"status": "sufficient", "known_critical_dependencies_not_inspected": []},
+        "source_excerpts": [
+            {"path": "main.py", "start_line": 1, "end_line": 3, "content": "def main():\n    return 1\n"},
+            {"path": "docs/example.py", "start_line": 1, "end_line": 800, "content": "example source\n" * 800},
+        ],
+        "repository_map": {"purpose": "prepared"},
+    }
+    provider, prompt, manifest = llm_service_module._fit_gemini_input(
+        {"file_tree": ["main.py", "docs/example.py"], "context_bundle": bundle, "analysis_evidence": {"counts": {"files": 2}}},
+        "system prompt", lambda text: (len(text) + 1) // 2, 2200,
+    )
+    assert manifest["estimated_tokens"] <= manifest["budget_tokens"]
+    assert manifest["omitted_source_ranges"]
+    assert all(item["reason"] == "gemini_input_token_budget" for item in manifest["omitted_source_ranges"])
+    assert any(item["path"] == "main.py" for item in provider["context_bundle"]["source_excerpts"])
+    assert "file_tree" not in provider
+    assert {item["field"] for item in manifest["omitted_fields"]} >= {"file_tree"}
+    assert "gemini_input_manifest" in prompt
+
+
+def test_gemma_failure_is_not_hidden_by_a_gemini_fallback(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(analysis_context, "_chat", lambda *args: (_ for _ in ()).throw(RuntimeError("provider unavailable")))
+    gemini_calls = []
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: gemini_calls.append(True) or "{}")
+    result = LLMService().generate_repository_analysis(
+        metadata={"full_name": "owner/repo", "commit_sha": "abc"}, readme="", stack={},
+        repository_structure=[], scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
+    )
+    diagnostics = result["analysis_evidence"]["pipeline_diagnostics"]
+    assert result["analysis_status"] == "degraded"
+    assert result["analysis_error"] == "gemma_provider_failure"
+    assert diagnostics["gemma"]["status"] == "failed"
+    assert diagnostics["gemini"]["status"] == "not_run"
+    assert not gemini_calls
+
+
+def test_malformed_and_partial_gemini_outputs_are_distinguished(monkeypatch):
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: "{}")
+    malformed = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
+    assert malformed["analysis_status"] == "degraded"
+    assert malformed["analysis_error"] == "gemini_malformed_output"
+    assert malformed["analysis_evidence"]["pipeline_diagnostics"]["failure_stage"] == "gemini_output"
+
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: '{"overview":"Partial report"}')
+    partial = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
+    assert partial["analysis_status"] == "partial"
+    assert partial["analysis_error"] == "gemini_partial_output"
+
+
+def test_insufficient_gemma_coverage_is_reported_and_blocks_gemini(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(analysis_context.settings, "context_per_file_token_budget", 128)
+    gemini_calls = []
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: gemini_calls.append(True) or "{}")
+    result = LLMService().generate_repository_analysis(
+        metadata={"full_name": "owner/repo"}, readme="", stack={}, repository_structure=[],
+        scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
+    )
+    assert result["analysis_error"] == "insufficient_repository_coverage"
+    assert result["analysis_evidence"]["pipeline_diagnostics"]["coverage"]["status"] == "insufficient"
+    assert not gemini_calls
+
+
+def test_malformed_gemma_response_has_a_distinct_stage_diagnostic(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(analysis_context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(analysis_context, "_chat", lambda *args: "not-json")
+    result = LLMService().generate_repository_analysis(
+        metadata={"full_name": "owner/repo"}, readme="", stack={}, repository_structure=[],
+        scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
+    )
+    diagnostics = result["analysis_evidence"]["pipeline_diagnostics"]
+    assert result["analysis_error"] == "gemma_malformed_output"
+    assert diagnostics["failure_stage"] == "gemma"
+    assert diagnostics["gemini"]["status"] == "not_run"

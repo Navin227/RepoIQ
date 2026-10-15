@@ -10,18 +10,165 @@ from app.config import settings
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.source_evidence_extractor import redact_secrets
-from app.services.repository_model import RepositoryRetrieval
 from app.services.analysis_diagnostics import emit
-from app.services.analysis_context import prepare_context
+from app.services.analysis_context import ContextPreparationError, prepare_context
 
 logger = logging.getLogger(__name__)
-MAX_GEMINI_INPUT_TOKENS = 100_000
 UNKNOWN = "Unable to confidently determine from repository evidence."
+
+
+def _fit_gemini_input(payload: Dict[str, Any], instructions: str, count_tokens, budget: int) -> tuple[Dict[str, Any], str, dict[str, Any]]:
+    """Fit the actual final prompt and account for every context omission."""
+    provider_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    omissions: list[dict[str, Any]] = []
+    removed_fields: list[dict[str, str]] = []
+    context_bundle = provider_payload.get("context_bundle")
+    context_bundle = context_bundle if isinstance(context_bundle, dict) else {}
+    if context_bundle and "file_tree" in provider_payload:
+        provider_payload.pop("file_tree")
+        removed_fields.append({"field": "file_tree", "reason": "duplicated_by_coverage_manifest"})
+    excerpts = context_bundle.get("source_excerpts")
+    excerpts = excerpts if isinstance(excerpts, list) else []
+    coverage_files = {
+        item.get("path"): item
+        for item in (context_bundle.get("coverage_manifest", {}).get("files", []))
+        if isinstance(item, dict) and item.get("path")
+    }
+    for entry in coverage_files.values():
+        entry["gemini_supplied_line_ranges"] = []
+        entry["gemini_omitted_line_ranges"] = []
+    for excerpt in excerpts:
+        if isinstance(excerpt, dict) and excerpt.get("path") in coverage_files:
+            coverage_files[excerpt["path"]]["gemini_supplied_line_ranges"].append({"start_line": excerpt.get("start_line"), "end_line": excerpt.get("end_line")})
+    manifest: dict[str, Any] = {"budget_tokens": budget, "estimated_tokens": None, "estimated": False, "omitted_source_ranges": omissions, "omitted_fields": removed_fields}
+
+    def build_prompt() -> str:
+        provider_payload["gemini_input_manifest"] = manifest
+        return instructions + "\n\nRepository input:\n" + json.dumps(provider_payload, ensure_ascii=False, indent=2)
+
+    def measure(prompt: str) -> int:
+        try:
+            measured = count_tokens(prompt)
+            if not isinstance(measured, int) or measured < 1:
+                raise ValueError("Gemini token counter returned no token count")
+            return measured
+        except Exception:
+            manifest["estimated"] = True
+            return max(1, (len(prompt) + 1) // 2)
+
+    prompt = build_prompt()
+    token_count = measure(prompt)
+    while token_count > budget and excerpts:
+        paths = sorted(
+            {item.get("path") for item in excerpts if isinstance(item, dict) and item.get("path")},
+            key=lambda path: (
+                bool(coverage_files.get(path, {}).get("important_to_execution_path")),
+                0 if "entry_point" not in coverage_files.get(path, {}).get("roles", []) else 1,
+                -(coverage_files.get(path, {}).get("execution_path_distance") or 0),
+                str(path).casefold(),
+            ),
+        )
+        if not paths:
+            break
+        # Remove lower-priority paths in deterministic groups to bound calls to
+        # Gemini's token counter while preserving execution-path evidence first.
+        drop_paths = paths[:max(1, (len(paths) + 7) // 8)]
+        keep = []
+        for item in excerpts:
+            if not isinstance(item, dict) or item.get("path") not in drop_paths:
+                keep.append(item)
+                continue
+            omissions.append({"path": item["path"], "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "gemini_input_token_budget"})
+            if item.get("path") in coverage_files:
+                entry = coverage_files[item["path"]]
+                entry["gemini_supplied_line_ranges"] = [r for r in entry["gemini_supplied_line_ranges"] if r != {"start_line": item.get("start_line"), "end_line": item.get("end_line")}]
+                entry["gemini_omitted_line_ranges"].append({"start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "gemini_input_token_budget"})
+        excerpts = keep
+        context_bundle["source_excerpts"] = excerpts
+        prompt = build_prompt()
+        token_count = measure(prompt)
+
+    # The inventory in the manifest replaces this shallow duplicate tree.
+    for field in ("file_tree", "repository_structure"):
+        if token_count <= budget:
+            break
+        if field in provider_payload:
+            provider_payload.pop(field)
+            removed_fields.append({"field": field, "reason": "gemini_input_token_budget_duplicate_inventory"})
+            prompt = build_prompt()
+            token_count = measure(prompt)
+
+    # For requests without a clone path, retain scan findings but remove only
+    # old inline previews if those are the remaining oversized context.
+    details = (provider_payload.get("source_evidence") or {}).get("selected_source_file_details", [])
+    details = details if isinstance(details, list) else []
+    while token_count > budget:
+        candidates = sorted(
+            (item for item in details if isinstance(item, dict) and item.get("content")),
+            key=lambda item: (int(item.get("priority", 0)), str(item.get("path", "")).casefold()),
+        )
+        if not candidates:
+            break
+        drop_count = max(1, (len(candidates) + 7) // 8)
+        for item in candidates[:drop_count]:
+            item["content"] = ""
+            item["content_omitted_reason"] = "Gemini input token budget"
+            omissions.append({"path": item.get("path"), "start_line": item.get("start_line"), "end_line": item.get("end_line"), "reason": "Gemini input token budget"})
+        prompt = build_prompt()
+        token_count = measure(prompt)
+
+    manifest["estimated_tokens"] = token_count
+    dropped_critical = sorted({item["path"] for item in omissions if coverage_files.get(item["path"], {}).get("important_to_execution_path")})
+    if dropped_critical:
+        gate = provider_payload.get("coverage_gate") or context_bundle.get("coverage_gate")
+        if isinstance(gate, dict):
+            gate["status"] = "partial"
+            gate["core_execution_paths_sufficiently_covered"] = False
+            gate["known_critical_dependencies_not_inspected"] = sorted(set(gate.get("known_critical_dependencies_not_inspected", [])) | set(dropped_critical))
+            gate["reason"] = "Gemini input budget omitted evidence from critical execution paths"
+            context_bundle["coverage_gate"] = gate
+            coverage_manifest = context_bundle.get("coverage_manifest")
+            if isinstance(coverage_manifest, dict):
+                coverage_manifest["coverage"] = gate
+    for _ in range(2):
+        prompt = build_prompt()
+        measured = measure(prompt)
+        if measured == manifest["estimated_tokens"]:
+            break
+        manifest["estimated_tokens"] = measured
+    prompt = build_prompt()
+    return provider_payload, prompt, manifest
 
 
 class LLMService:
     def __init__(self, provider: str = "gemini") -> None:
         self.provider = provider
+
+    @staticmethod
+    def _validate_gemini_output(value: Dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise RuntimeError("Gemini returned malformed output: expected a JSON object")
+        if not any(value.get(key) for key in ("overview", "executive_overview", "claims", "modules", "architecture", "report_sections")):
+            raise RuntimeError("Gemini returned malformed output: no report content")
+        expected = {"overview": str, "executive_overview": dict, "claims": list, "modules": list,
+                    "architecture": dict, "report_sections": dict, "investigation_requests": list}
+        missing = sorted(set(expected) - set(value))
+        wrong_types = sorted(key for key, kind in expected.items() if key in value and not isinstance(value[key], kind))
+        incomplete = bool(missing or wrong_types)
+        return {"status": "partial" if incomplete else "complete",
+                "code": "gemini_partial_output" if incomplete else "ok",
+                "missing_fields": missing, "invalid_type_fields": wrong_types}
+
+    @staticmethod
+    def _complete_partial_output_shape(value: Dict[str, Any]) -> Dict[str, Any]:
+        defaults = {
+            "overview": "", "executive_overview": {}, "claims": [], "modules": [],
+            "architecture": {}, "report_sections": {}, "investigation_requests": [],
+        }
+        for key, default in defaults.items():
+            if not isinstance(value.get(key), type(default)):
+                value[key] = default
+        return value
 
     def generate_repository_analysis(
         self,
@@ -49,15 +196,21 @@ class LLMService:
 
         context_bundle = None
         context_error = None
+        context_diagnostic = {"status": "skipped", "code": "no_repository_path"}
+        gemini_output_diagnostic = {"status": "not_received", "code": "not_run"}
         if repo_path:
+            context_diagnostic = {"status": "failed", "code": "context_preparation_failure"}
             try:
                 context_bundle = prepare_context(
                     metadata, scan, repo_path, str(metadata.get("commit_sha") or ""), payload
                 )
                 payload["context_bundle"] = context_bundle
-                payload["coverage_manifest"] = context_bundle["coverage_manifest"]
+                context_diagnostic = {"status": "prepared", "code": "ok"}
             except Exception as exc:
-                context_error = exc
+                context_error = exc if isinstance(exc, ContextPreparationError) else ContextPreparationError(
+                    f"Context preparation failed: {type(exc).__name__}", "context_preparation_failure"
+                )
+                context_diagnostic = {"status": "failed", "code": context_error.diagnostic_code}
 
         emit(logger, "analysis_request_start", stage="llm_analysis", analysis_run_id=analysis_id,
              repository=metadata.get("full_name") or metadata.get("name") or "unknown",
@@ -71,103 +224,109 @@ class LLMService:
                 self.provider,
                 json.dumps(payload, ensure_ascii=False, indent=2),
             )
-            generated = None
-            for round_number in range(1):
-                payload["investigation_round"] = round_number + 1
-                llm_started = time.perf_counter()
-                emit(logger, "llm_request_started", stage="llm_request", analysis_run_id=analysis_id,
-                     repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
-                     round=round_number + 1, purpose="initial_analysis" if round_number == 0 else "evidence_followup",
-                     evidence_file_count=len(payload.get("selected_source_file_details", [])),
-                     retrieved_match_count=len(payload.get("on_demand_source_matches", [])))
-                source_details = (
-                    (payload.get("source_evidence") or {}).get(
-                        "selected_source_file_details", []
-                    )
-                    if isinstance(payload.get("source_evidence"), dict)
-                    else []
-                )
-                emit(logger, "llm_request_context_snapshot", stage="llm_request",
-                     analysis_run_id=analysis_id, round=round_number + 1,
-                     repository=metadata.get("full_name") or metadata.get("name"),
-                     commit_sha=metadata.get("commit_sha"),
-                     context={
-                         "metadata": payload.get("metadata"),
-                         "readme_preview": str(payload.get("readme_text") or "")[:1800],
-                         "technology_stack": payload.get("detected_technology_stack"),
-                         "inventory_count": payload.get("inventory_file_count"),
-                         "source_file_previews": [
-                             {key: item.get(key) for key in ("path", "role", "symbols", "imports")}
-                             | {"content_preview": str(item.get("content") or "")[:500]}
-                             for item in source_details[:8] if isinstance(item, dict)
-                         ],
-                         "retrieved_matches": [
-                             {key: item.get(key) for key in ("path", "start_line", "end_line", "text", "match_kind")}
-                             for item in payload.get("on_demand_source_matches", [])[:12]
-                             if isinstance(item, dict)
-                         ],
-                         "investigation_coverage": payload.get("investigation_coverage"),
-                     })
-                response_text = self._generate_with_gemini(payload)
-                self._log_gemini_output(analysis_id, self.provider, response_text)
-                emit(logger, "llm_response_received", stage="llm_request", analysis_run_id=analysis_id,
-                     round=round_number + 1, duration_ms=round((time.perf_counter() - llm_started) * 1000),
-                     response_chars=len(response_text), response_status="received",
-                     response_preview=response_text[:2400])
-                try:
-                    generated = self._parse_json_response(response_text)
-                except Exception as exc:
-                    emit(logger, "llm_response_parse_failed", level=logging.ERROR, stage="llm_response_parse",
-                         analysis_run_id=analysis_id, round=round_number + 1, response_chars=len(response_text),
-                         exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
-                    raise
-                requests = generated.get("investigation_requests", []) if isinstance(generated, dict) else []
-                emit(logger, "llm_response_parsed", stage="llm_response_parse", analysis_run_id=analysis_id,
-                     round=round_number + 1, claim_count=len(generated.get("claims", [])),
-                     module_count=len(generated.get("modules", [])), investigation_request_count=len(requests),
-                     parsed_result={
-                         "overview": generated.get("overview"),
-                         "executive_overview": generated.get("executive_overview"),
-                         "modules": generated.get("modules", [])[:6]
-                         if isinstance(generated.get("modules"), list) else [],
-                         "architecture": generated.get("architecture"),
-                         "claims": generated.get("claims", [])[:16]
-                         if isinstance(generated.get("claims"), list) else [],
-                         "investigation_requests": requests[:12]
-                         if isinstance(requests, list) else [],
-                     })
-                coverage_unresolved = list(requests) if isinstance(requests, list) else []
-                if context_bundle:
-                    coverage_unresolved.extend(context_bundle["limitations"]["unresolved_files"])
-                    coverage_unresolved.extend(context_bundle["limitations"]["unresolved_questions"])
-                    coverage_unresolved.extend(context_bundle["limitations"]["conflicting_findings"])
-                payload["investigation_coverage"] = {
-                    "rounds": 1,
-                    "unresolved": coverage_unresolved,
-                    "additional_matches": 0,
-                }
-                break
-            if generated is None:
-                raise ValueError("Gemini returned no analysis")
-            analysis = self._normalize_analysis(generated, payload)
-            analysis["analysis_evidence"] = payload["analysis_evidence"]
+            llm_started = time.perf_counter()
+            emit(logger, "llm_request_started", stage="llm_request", analysis_run_id=analysis_id,
+                 repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
+                 purpose="final_repository_analysis", context_preparation=context_diagnostic)
+            emit(logger, "llm_request_context_snapshot", stage="llm_request", analysis_run_id=analysis_id,
+                 repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
+                 context={"context_bundle_present": bool(payload.get("context_bundle")),
+                          "source_excerpt_count": len((payload.get("context_bundle") or {}).get("source_excerpts", [])),
+                          "coverage_gate": (payload.get("context_bundle") or {}).get("coverage_gate"),
+                          "deterministic_evidence_present": bool(payload.get("analysis_evidence"))})
+            response_text = self._generate_with_gemini(payload)
+            self._log_gemini_output(analysis_id, self.provider, response_text)
+            emit(logger, "llm_response_received", stage="llm_request", analysis_run_id=analysis_id,
+                 duration_ms=round((time.perf_counter() - llm_started) * 1000),
+                 response_chars=len(response_text), response_status="received", response_preview=response_text[:2400])
+            try:
+                generated = self._parse_json_response(response_text)
+            except Exception as exc:
+                emit(logger, "llm_response_parse_failed", level=logging.ERROR, stage="llm_response_parse",
+                     analysis_run_id=analysis_id, exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
+                raise RuntimeError("Gemini returned malformed output: invalid JSON response") from exc
+            gemini_output_diagnostic = self._validate_gemini_output(generated)
+            payload["gemini_output_diagnostic"] = gemini_output_diagnostic
+            if gemini_output_diagnostic["status"] == "partial":
+                generated = self._complete_partial_output_shape(generated)
+            requests = generated.get("investigation_requests", [])
+            emit(logger, "llm_response_parsed", stage="llm_response_parse", analysis_run_id=analysis_id,
+                 claim_count=len(generated.get("claims", [])) if isinstance(generated.get("claims"), list) else 0,
+                 module_count=len(generated.get("modules", [])) if isinstance(generated.get("modules"), list) else 0,
+                 investigation_request_count=len(requests) if isinstance(requests, list) else 0)
+            coverage_unresolved = list(requests) if isinstance(requests, list) else []
             if context_bundle:
-                analysis["analysis_evidence"]["coverage_manifest"] = context_bundle["coverage_manifest"]
-                analysis["coverage_manifest"] = context_bundle["coverage_manifest"]
+                coverage_unresolved.extend(context_bundle["limitations"]["unresolved_files"])
+                coverage_unresolved.extend(context_bundle["limitations"]["unresolved_questions"])
+                coverage_unresolved.extend(context_bundle["limitations"]["conflicting_findings"])
+            payload["investigation_coverage"] = {"unresolved": coverage_unresolved}
+            analysis = self._normalize_analysis(generated, payload)
+            raw_architecture = generated.get("architecture") if isinstance(generated.get("architecture"), dict) else {}
+            normalized_architecture = analysis.get("architecture") or {}
+            raw_executive = generated.get("executive_overview") if isinstance(generated.get("executive_overview"), dict) else {}
+            normalized_executive = analysis.get("executive_overview") or {}
+            normalization_diagnostic = {
+                "status": "filtered" if any((
+                    len(generated.get("modules", [])) > len(analysis.get("modules", [])) if isinstance(generated.get("modules"), list) else False,
+                    len(raw_architecture.get("components", [])) > len(normalized_architecture.get("components", [])) if isinstance(raw_architecture.get("components"), list) else False,
+                    len(raw_executive.get("user_features", [])) > len(normalized_executive.get("user_features", [])) if isinstance(raw_executive.get("user_features"), list) else False,
+                )) else "passed",
+                "counts": {
+                    "modules": {"before": len(generated.get("modules", [])) if isinstance(generated.get("modules"), list) else 0, "after": len(analysis.get("modules", []))},
+                    "features": {"before": len(raw_executive.get("user_features", [])) if isinstance(raw_executive.get("user_features"), list) else 0, "after": len(normalized_executive.get("user_features", []))},
+                    "architecture_components": {"before": len(raw_architecture.get("components", [])) if isinstance(raw_architecture.get("components"), list) else 0, "after": len(normalized_architecture.get("components", []))},
+                    "claims": {"before": len(generated.get("claims", [])) if isinstance(generated.get("claims"), list) else 0, "after": len(analysis.get("claims", []))},
+                },
+                "reason_counts": {},
+            }
+            module_removals = normalization_diagnostic["counts"]["modules"]["before"] - normalization_diagnostic["counts"]["modules"]["after"]
+            feature_removals = normalization_diagnostic["counts"]["features"]["before"] - normalization_diagnostic["counts"]["features"]["after"]
+            component_removals = normalization_diagnostic["counts"]["architecture_components"]["before"] - normalization_diagnostic["counts"]["architecture_components"]["after"]
+            if module_removals:
+                normalization_diagnostic["reason_counts"]["path_not_in_manifest_or_invalid_module_evidence"] = module_removals
+            if feature_removals:
+                normalization_diagnostic["reason_counts"]["path_not_in_manifest"] = feature_removals
+            if component_removals:
+                normalization_diagnostic["reason_counts"]["invalid_schema_or_unknown_component_path"] = component_removals
+            analysis["analysis_evidence"] = payload["analysis_evidence"]
+            analysis["analysis_evidence"]["semantic_repository_profile"] = payload.get("semantic_repository_profile", {})
+            effective_gate = payload.get("gemini_coverage_gate") or (context_bundle or {}).get("coverage_gate")
+            if context_bundle:
+                final_manifest = payload.get("gemini_coverage_manifest") or context_bundle["coverage_manifest"]
+                analysis["analysis_evidence"]["coverage_manifest"] = final_manifest
+                analysis["coverage_manifest"] = final_manifest
                 analysis["analysis_evidence"]["context_preparation"] = {
-                    "status": "complete" if not context_bundle["limitations"]["unresolved_files"] else "partial",
+                    "status": "complete" if effective_gate.get("status") == "sufficient" and not context_bundle["limitations"]["unresolved_files"] and not final_manifest.get("partially_inspected_count") else "partial",
+                    "coverage_gate": effective_gate,
                     "provider": settings.openrouter_model,
                 }
-            if payload.get("on_demand_source_matches"):
-                analysis["analysis_evidence"]["on_demand_source_matches"] = payload["on_demand_source_matches"]
+            if payload.get("gemini_input_manifest"):
+                analysis["analysis_evidence"]["gemini_input_manifest"] = payload["gemini_input_manifest"]
+            analysis["analysis_evidence"]["pipeline_diagnostics"] = {
+                "context_preparation": context_diagnostic,
+                "gemma": {"status": "completed" if context_bundle else "skipped", "code": "ok" if context_bundle else "no_repository_path"},
+                "gemini": {"status": "completed", "code": "ok"},
+                "gemini_output": gemini_output_diagnostic,
+                "normalization": normalization_diagnostic,
+                "gemini_generation": payload.get("gemini_generation_diagnostic", {"status": "complete"}),
+                "coverage": effective_gate or {"status": "not_assessed"},
+                "evidence_validation": {"status": "pending_route_validation"},
+                "output_filtering": {"status": "pending_route_filtering"},
+            }
             analysis["ai_insights"] = []
             coverage = payload.get("investigation_coverage") or {}
             if coverage:
                 payload["analysis_evidence"]["investigation_coverage"] = coverage
-            manifest = context_bundle.get("coverage_manifest", {}) if context_bundle else {}
+            manifest = (payload.get("gemini_coverage_manifest") or context_bundle.get("coverage_manifest", {})) if context_bundle else {}
             analysis["analysis_status"] = "partial" if (
                 coverage.get("unresolved") or manifest.get("omitted_count") or manifest.get("unreadable_count")
+                or (effective_gate and effective_gate.get("status") != "sufficient")
+                or gemini_output_diagnostic["status"] != "complete"
+                or (payload.get("gemini_generation_diagnostic") or {"status": "complete"}).get("status") != "complete"
+                or bool((payload.get("gemini_input_manifest") or {}).get("omitted_source_ranges"))
             ) else "ai_generated"
+            if analysis["analysis_status"] == "partial" and gemini_output_diagnostic["status"] != "complete":
+                analysis["analysis_error"] = gemini_output_diagnostic["code"]
             emit(logger, "llm_analysis_completed", stage="llm_analysis", analysis_run_id=analysis_id,
                  duration_ms=round((time.perf_counter() - started) * 1000), status=analysis["analysis_status"],
                  claim_count=len(analysis.get("claims", [])), module_count=len(analysis.get("modules", [])))
@@ -176,11 +335,18 @@ class LLMService:
                  status=analysis["analysis_status"])
             return analysis
         except Exception as exc:
+            failure_code = self._failure_reason(exc)
+            failure_stage = (
+                "context_preparation" if failure_code in {"context_preparation_failure", "insufficient_repository_coverage"}
+                else "gemma" if failure_code.startswith("gemma_")
+                else "gemini_output" if failure_code == "gemini_malformed_output"
+                else "gemini"
+            )
             emit(logger, "llm_analysis_failed", level=logging.ERROR, stage="llm_analysis",
                  analysis_run_id=analysis_id, duration_ms=round((time.perf_counter() - started) * 1000),
                  exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
             emit(logger, "analysis_degraded", level=logging.WARNING, stage="llm_analysis",
-                 analysis_run_id=analysis_id, error_code=self._failure_reason(exc))
+                 analysis_run_id=analysis_id, error_code=failure_code)
             # Provider failure is a degraded result. Never turn metadata or filenames
             # into a fabricated successful architecture.
             analysis = {
@@ -191,11 +357,27 @@ class LLMService:
                 "analysis_evidence": payload["analysis_evidence"],
                 "ai_insights": [],
                 "analysis_status": "degraded",
-                "analysis_error": self._failure_reason(exc),
+                "analysis_error": failure_code,
             }
-            analysis["analysis_evidence"]["investigation_coverage"] = {"status": "degraded", "unresolved": ["LLM analysis failed."]}
+            if payload.get("gemini_input_manifest"):
+                analysis["analysis_evidence"]["gemini_input_manifest"] = payload["gemini_input_manifest"]
+            if context_bundle:
+                final_manifest = payload.get("gemini_coverage_manifest") or context_bundle["coverage_manifest"]
+                analysis["coverage_manifest"] = final_manifest
+                analysis["analysis_evidence"]["coverage_manifest"] = final_manifest
+                analysis["analysis_evidence"]["semantic_repository_profile"] = payload.get("semantic_repository_profile", {})
+            analysis["analysis_evidence"]["pipeline_diagnostics"] = {
+                "context_preparation": context_diagnostic,
+                "gemma": {"status": "failed" if failure_stage == "gemma" else "completed" if context_bundle else "not_run", "code": failure_code if failure_stage == "gemma" else "ok" if context_bundle else "not_applicable"},
+                "gemini": {"status": "failed" if failure_stage == "gemini" else "completed" if failure_stage == "gemini_output" else "not_run", "code": failure_code if failure_stage == "gemini" else "ok" if failure_stage == "gemini_output" else "not_applicable"},
+                "gemini_output": {"status": "malformed" if failure_stage == "gemini_output" else "not_received", "code": failure_code},
+                "coverage": context_bundle.get("coverage_gate", {"status": "insufficient" if failure_code == "insufficient_repository_coverage" else "unknown"}) if context_bundle else {"status": "insufficient" if failure_code == "insufficient_repository_coverage" else "unknown"},
+                "failure_stage": failure_stage,
+                "failure_code": failure_code,
+            }
+            analysis["analysis_evidence"]["investigation_coverage"] = {"status": "degraded", "unresolved": [failure_code]}
             emit(logger, "analysis_request_end", stage="llm_analysis", analysis_run_id=analysis_id,
-                 status="degraded", error_code=self._failure_reason(exc))
+                 status="degraded", error_code=failure_code)
             return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
@@ -226,11 +408,6 @@ class LLMService:
         provider_payload["analysis_id"] = analysis_id
 
         instructions = (Path(__file__).parent / "prompts" / "repo_analysis_system.txt").read_text(encoding="utf-8")
-        prompt = (
-            instructions
-            + "\n\nRepository input:\n"
-            + json.dumps(provider_payload, ensure_ascii=False, indent=2)
-        )
 
         genai.configure(api_key=settings.gemini_api_key)
         generation_config = genai.types.GenerationConfig(
@@ -246,81 +423,38 @@ class LLMService:
 
             try:
                 model = genai.GenerativeModel(model_name)
-                try:
-                    token_response = model.count_tokens(prompt)
-                    token_count = getattr(token_response, "total_tokens", None)
-                    if not isinstance(token_count, int):
+                def count_tokens(text: str) -> int:
+                    result = model.count_tokens(text)
+                    value = getattr(result, "total_tokens", None)
+                    if not isinstance(value, int):
                         raise ValueError("Gemini token counter returned no token count")
-                except Exception as exc:
-                    token_count = (len(prompt) + 1) // 2
+                    return value
+
+                input_budget = max(256, int(settings.gemini_input_token_budget))
+                provider_payload, prompt, input_manifest = _fit_gemini_input(
+                    provider_payload, instructions, count_tokens, input_budget
+                )
+                payload["gemini_input_manifest"] = input_manifest
+                payload["gemini_coverage_gate"] = (provider_payload.get("context_bundle") or {}).get("coverage_gate") or provider_payload.get("coverage_gate")
+                if isinstance((provider_payload.get("context_bundle") or {}).get("coverage_manifest"), dict):
+                    payload["gemini_coverage_manifest"] = provider_payload["context_bundle"]["coverage_manifest"]
+                token_count = input_manifest["estimated_tokens"]
+                if input_manifest.get("estimated"):
                     emit(logger, "gemini_token_count_unavailable", level=logging.WARNING, stage="gemini_prepare",
-                         analysis_run_id=analysis_id, model=model_name, exception_type=type(exc).__name__, estimated_tokens=token_count)
+                         analysis_run_id=analysis_id, model=model_name, estimated_tokens=token_count)
+                if token_count > input_budget:
+                    raise RuntimeError(f"Gemini input exceeds configured token budget ({token_count}>{input_budget})")
 
-                details = (
-                    provider_payload.get("source_evidence", {}).get(
-                        "selected_source_file_details", []
-                    )
-                )
-                omitted_files = []
-
-                while token_count > MAX_GEMINI_INPUT_TOKENS and details:
-                    ranked = sorted(
-                        (
-                            item
-                            for item in details
-                            if isinstance(item, dict) and item.get("content")
-                        ),
-                        key=lambda item: (
-                            int(item.get("priority", 0)),
-                            str(item.get("path", "")),
-                        ),
-                    )
-                    if not ranked:
-                        break
-
-                    drop_count = max(1, (len(ranked) + 3) // 4)
-                    for item in ranked[:drop_count]:
-                        item["content"] = ""
-                        item["content_omitted_reason"] = "Gemini input token budget"
-                        omitted_files.append(str(item.get("path") or ""))
-
-                    provider_payload["provider_evidence_exclusions"] = [
-                        {"path": path, "reason": "Gemini input token budget"}
-                        for path in omitted_files
-                    ]
-                    prompt = (
-                        instructions
-                        + "\n\nRepository input:\n"
-                        + json.dumps(provider_payload, ensure_ascii=False, indent=2)
-                    )
-
-                    try:
-                        token_response = model.count_tokens(prompt)
-                        token_count = getattr(token_response, "total_tokens", None)
-                        if not isinstance(token_count, int):
-                            raise ValueError("Gemini token counter returned no token count")
-                    except Exception as exc:
-                        token_count = (len(prompt) + 1) // 2
-                        emit(logger, "gemini_token_count_unavailable", level=logging.WARNING, stage="gemini_prepare",
-                             analysis_run_id=analysis_id, model=model_name, exception_type=type(exc).__name__, estimated_tokens=token_count)
-
-                if token_count > MAX_GEMINI_INPUT_TOKENS:
-                    raise RuntimeError("Gemini input exceeds the bounded token budget")
-
-                selected_chars = sum(
-                    len(item.get("content") or "")
-                    for item in details
-                    if isinstance(item, dict)
-                )
-                selected_files = sum(
-                    bool(item.get("content"))
-                    for item in details
-                    if isinstance(item, dict)
-                )
+                selected_excerpts = ((provider_payload.get("context_bundle") or {}).get("source_excerpts") or [])
+                selected_chars = sum(len(item.get("content") or "") for item in selected_excerpts if isinstance(item, dict))
+                selected_files = len({item.get("path") for item in selected_excerpts if isinstance(item, dict)})
+                omitted_files = len({item.get("path") for item in input_manifest["omitted_source_ranges"]})
 
                 emit(logger, "gemini_request_prepared", stage="gemini_prepare", analysis_run_id=analysis_id,
                      model=model_name, payload_chars=len(prompt), source_chars_selected=selected_chars,
-                     selected_file_count=selected_files, excluded_file_count=len(omitted_files), input_tokens=token_count)
+                     selected_file_count=selected_files, excluded_file_count=omitted_files,
+                     omitted_field_count=len(input_manifest["omitted_fields"]), input_tokens=token_count,
+                     input_budget=input_budget)
                 self._log_gemini_input(analysis_id, model_name, prompt)
                 provider_started = time.perf_counter()
                 response = model.generate_content(
@@ -338,6 +472,11 @@ class LLMService:
                     finish_reason = response.candidates[0].finish_reason
                 except (AttributeError, IndexError, TypeError):
                     pass
+                finish_text = str(finish_reason or "").casefold()
+                payload["gemini_generation_diagnostic"] = {
+                    "status": "partial" if "max_tokens" in finish_text or finish_text in {"2", "finishreason.max_tokens"} else "complete",
+                    "finish_reason": finish_text or None,
+                }
                 emit(logger, "gemini_response_metadata", stage="gemini_response", analysis_run_id=analysis_id,
                      model=model_name, finish_reason=str(finish_reason), response_chars=len(response_text))
                 if not response_text.strip():
@@ -394,16 +533,21 @@ class LLMService:
 
     @staticmethod
     def _failure_reason(exc: Exception) -> str:
+        diagnostic_code = getattr(exc, "diagnostic_code", None)
+        if diagnostic_code:
+            return str(diagnostic_code)
         message = str(exc).lower()
+        if any(term in message for term in ("malformed output", "no report content", "valid json", "json object", "empty response")):
+            return "gemini_malformed_output"
+        if "context token budget" in message:
+            return "gemini_input_token_budget_exceeded"
         if "not configured" in message:
-            return "gemini_credentials_not_configured"
+            return "gemini_credentials_not_configured" if "gemini" in message else "gemma_credentials_not_configured"
         if "not installed" in message:
             return "gemini_dependency_missing"
-        if any(term in message for term in ("empty response", "valid json", "json object")):
-            return "invalid_provider_response"
         if "token budget" in message:
             return "gemini_input_token_budget_exceeded"
-        return f"provider_or_validation_error:{type(exc).__name__}"
+        return "gemini_provider_failure"
 
     @staticmethod
     def _log_analysis_sections(
@@ -479,8 +623,8 @@ class LLMService:
             "readme_text": readme_text,
             "detected_technology_stack": stack,
             "repository_structure": self._trim_structure(repository_structure),
-            # The complete inventory stays in RepositoryRetrieval. A bounded
-            # preview is enough for prompt orientation; all paths remain searchable.
+            # This preview supports post-generation evidence-path normalization.
+            # The Gemini request uses Gemma's manifest as the complete inventory.
             "file_tree": scan.get("files", [])[:500],
             "inventory_file_count": len(scan.get("files", [])),
             "code_signals": code_signals,
@@ -748,13 +892,16 @@ class LLMService:
                 if isinstance(detail, dict) and detail.get("path"):
                     evidence_paths.append(detail["path"])
 
-        raw_paths = list(payload.get("file_tree", [])) + evidence_paths
-        raw_paths += [
-            item.get("path") for item in payload.get("on_demand_source_matches", [])
-            if isinstance(item, dict) and item.get("path")
-        ]
+        bundle_files = ((payload.get("context_bundle") or {}).get("coverage_manifest") or {}).get("files", [])
+        if isinstance(payload.get("context_bundle"), dict):
+            raw_paths = [
+                item.get("path") for item in bundle_files
+                if isinstance(item, dict) and item.get("path") and item.get("gemini_supplied_line_ranges")
+            ]
+        else:
+            raw_paths = list(payload.get("file_tree", [])) + evidence_paths
         known_paths = {
-            normalized
+            normalized.casefold()
             for normalized in (
                 self._normalize_evidence_path(path) for path in raw_paths
             )
@@ -762,7 +909,7 @@ class LLMService:
         }
 
         known_routes = {
-            normalized
+            normalized.casefold()
             for normalized in (
                 self._normalize_evidence_path(route, route=True)
                 for route in payload.get("api_routes", [])
@@ -775,7 +922,7 @@ class LLMService:
                     item["path"], route=True
                 )
                 if normalized:
-                    known_routes.add(normalized)
+                    known_routes.add(normalized.casefold())
 
         normalized_modules = []
         seen_module_names = set()
@@ -791,18 +938,11 @@ class LLMService:
                 or item.get("summary")
                 or ""
             ).strip()
-            confidence = self._coerce_confidence(item.get("confidence", 80))
+            model_confidence = self._coerce_confidence(item.get("confidence", 80))
 
             if (
                 not name
                 or not purpose
-                or confidence < 50
-                or self._is_generic_module_name(name)
-                or name.casefold() in {
-                    str(directory).strip().casefold()
-                    for directory in payload.get("top_level_modules", [])
-                    if isinstance(directory, str)
-                }
             ):
                 continue
 
@@ -810,7 +950,10 @@ class LLMService:
             if module_key in seen_module_names:
                 continue
 
-            raw_components = self._normalize_string_list(item.get("components"))[:8]
+            raw_components = self._normalize_string_list(
+                self._normalize_string_list(item.get("components"))
+                + self._normalize_string_list(item.get("evidence"))
+            )[:12]
             supported_components = []
 
             for component in raw_components:
@@ -823,8 +966,8 @@ class LLMService:
                 # Basename matches and README substring matches are deliberately
                 # excluded because they can validate unrelated repository evidence.
                 if (
-                    normalized_path in known_paths
-                    or normalized_route in known_routes
+                    normalized_path.casefold() in known_paths
+                    or normalized_route.casefold() in known_routes
                 ):
                     supported_components.append(component.strip())
 
@@ -853,7 +996,8 @@ class LLMService:
                     "connected_modules": self._normalize_string_list(
                         item.get("connected_modules")
                     )[:8],
-                    "confidence": confidence,
+                    "confidence": model_confidence,
+                    "model_confidence": model_confidence,
                 }
             )
 
@@ -904,19 +1048,23 @@ class LLMService:
                 continue
             seen.add(key)
             evidence = []
+            validation_reasons = []
             for ref in item.get("evidence", []) if isinstance(item.get("evidence"), list) else []:
                 if not isinstance(ref, dict):
+                    validation_reasons.append({"reason_code": "invalid_schema", "stage": "normalization"})
                     continue
                 path = str(ref.get("path") or "").strip()
                 start = ref.get("start_line")
                 end = ref.get("end_line")
                 if path and isinstance(start, int) and isinstance(end, int) and start >= 1 and end >= start:
                     evidence.append({"path": path, "start_line": start, "end_line": end, "excerpt": str(ref.get("excerpt") or "")})
+                else:
+                    validation_reasons.append({"reason_code": "invalid_line_range" if path else "path_not_in_manifest", "stage": "normalization", "path": path})
             try:
                 confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
             except (TypeError, ValueError):
                 confidence = 0.5
-            claims.append({"text": text, "subject": str(item.get("subject") or ""), "category": str(item.get("category") or "claim"), "target_name": str(item.get("target_name") or ""), "confidence": confidence, "evidence": evidence})
+            claims.append({"text": text, "subject": str(item.get("subject") or ""), "category": str(item.get("category") or "claim"), "target_name": str(item.get("target_name") or ""), "confidence": confidence, "model_confidence": confidence, "evidence": evidence, "validation_reasons": validation_reasons})
         return claims
 
     def _normalize_architecture(
@@ -938,13 +1086,22 @@ class LLMService:
         components = []
         known_repo_paths: set[str] = set()
         if isinstance(payload, dict):
-            known_repo_paths.update(
-                self._normalize_evidence_path(path)
-                for path in payload.get("file_tree", [])
-                if isinstance(path, str)
-            )
+            context_bundle = payload.get("context_bundle")
+            if isinstance(context_bundle, dict):
+                manifest = context_bundle.get("coverage_manifest") or {}
+                known_repo_paths.update(
+                    self._normalize_evidence_path(item.get("path"))
+                    for item in manifest.get("files", [])
+                    if isinstance(item, dict) and item.get("path") and item.get("gemini_supplied_line_ranges")
+                )
+            else:
+                known_repo_paths.update(
+                    self._normalize_evidence_path(path)
+                    for path in payload.get("file_tree", [])
+                    if isinstance(path, str)
+                )
             evidence = payload.get("analysis_evidence")
-            if isinstance(evidence, dict):
+            if isinstance(evidence, dict) and not isinstance(context_bundle, dict):
                 known_repo_paths.update(
                     self._normalize_evidence_path(path)
                     for path in evidence.get("source_files", [])
@@ -970,20 +1127,11 @@ class LLMService:
                 ]
                 if path_like_tokens and known_repo_paths:
                     normalized = {
-                        self._normalize_evidence_path(token)
+                        self._normalize_evidence_path(token).casefold()
                         for token in path_like_tokens
                     }
-                    if normalized and not normalized.intersection(known_repo_paths):
+                    if normalized and not normalized.intersection({path.casefold() for path in known_repo_paths}):
                         continue
-                elif name and not path_like_tokens and not any(
-                    keyword in name.casefold()
-                    for keyword in (
-                        "api", "gateway", "frontend", "backend", "worker",
-                        "database", "cache", "queue", "storage", "auth",
-                        "service", "db", "server", "client", "worker",
-                    )
-                ):
-                    continue
 
                 key = name.casefold()
                 if key in seen_components:
@@ -1005,6 +1153,7 @@ class LLMService:
                         "output": str(item.get("output") or UNKNOWN).strip(),
                         "communicates_with": communications or connected_to or [UNKNOWN],
                         "connected_to": connected_to,
+                        "evidence": self._normalize_string_list(item.get("evidence"))[:8],
                     }
                 )
 
@@ -1103,7 +1252,7 @@ class LLMService:
                 for reference in raw_evidence:
                     normalized = self._normalize_evidence_path(reference)
                     route = self._normalize_evidence_path(reference, route=True)
-                    if normalized in feature_paths or route in feature_paths:
+                    if normalized.casefold() in feature_paths or route.casefold() in feature_paths:
                         supported_evidence.append(str(reference).strip())
 
                 if (
@@ -1111,7 +1260,7 @@ class LLMService:
                     and description
                     and not self._is_generic_module_name(name)
                     and not self._matches_repository_directory(name, payload)
-                    and name.strip().lower() not in {"storage", "database", "platform"}
+                    and not name.strip().lower() in {"storage", "database", "platform"}
                     and supported_evidence
                     and name.casefold() not in seen_feature_names
                 ):
@@ -1162,6 +1311,22 @@ class LLMService:
     def _feature_evidence_paths(self, payload: Dict[str, Any]) -> set[str]:
         """Return implementation files, API routes, and README allowed as feature evidence."""
         evidence_paths: set[str] = set()
+        context_bundle = payload.get("context_bundle")
+        manifest = context_bundle.get("coverage_manifest") if isinstance(context_bundle, dict) else None
+        if isinstance(manifest, dict):
+            for entry in manifest.get("files", []):
+                if not isinstance(entry, dict) or entry.get("status") not in {"fully_inspected", "partially_inspected"}:
+                    continue
+                if entry.get("gemini_supplied_line_ranges"):
+                    path = self._normalize_evidence_path(entry.get("path"))
+                    if path:
+                        evidence_paths.add(path.casefold())
+            for excerpt in context_bundle.get("source_excerpts", []):
+                if isinstance(excerpt, dict) and excerpt.get("path"):
+                    path = self._normalize_evidence_path(excerpt["path"])
+                    if path:
+                        evidence_paths.add(path.casefold())
+            return evidence_paths
         source_evidence = payload.get("source_evidence") or {}
         if isinstance(source_evidence, dict):
             functional_roles = {
@@ -1174,20 +1339,20 @@ class LLMService:
                     continue
                 path = self._normalize_evidence_path(item.get("path"))
                 if path:
-                    evidence_paths.add(path)
+                    evidence_paths.add(path.casefold())
 
             for route in source_evidence.get("routes", []):
                 if isinstance(route, dict):
                     path = self._normalize_evidence_path(route.get("path"), route=True)
                     if path:
-                        evidence_paths.add(path)
+                        evidence_paths.add(path.casefold())
 
         evidence = payload.get("analysis_evidence") or {}
         if isinstance(evidence, dict):
             for route in evidence.get("api_routes", []):
                 path = self._normalize_evidence_path(route, route=True)
                 if path:
-                    evidence_paths.add(path)
+                    evidence_paths.add(path.casefold())
 
         # Keep feature citations usable for callers that provide only the
         # repository file inventory rather than extractor role metadata.
@@ -1203,13 +1368,13 @@ class LLMService:
                 and PurePosixPath(normalized).suffix.lower() in source_suffixes
                 and not re.search(r"(^|/)(tests?|__tests__|spec)(/|$)", normalized)
             ):
-                evidence_paths.add(normalized)
+                evidence_paths.add(normalized.casefold())
 
         if str(payload.get("readme_text") or "").strip():
             readme_path = self._readme_evidence_path(payload)
             if readme_path:
                 evidence_paths.add(
-                    self._normalize_evidence_path(readme_path)
+                    self._normalize_evidence_path(readme_path).casefold()
                 )
         return evidence_paths
 

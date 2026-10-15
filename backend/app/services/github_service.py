@@ -160,30 +160,53 @@ class GitHubService:
 
         ranked_by_relevance = sorted(
             candidates.values(),
-            key=lambda item: score_relevance(query, item),
-            reverse=True,
+            key=lambda item: (
+                -score_relevance(query, item),
+                str(item.get("full_name") or "").casefold(),
+            ),
         )
 
         candidate_pool = ranked_by_relevance[:pool_size]
 
-        analyzable_candidates = [
+        candidates_to_inspect = [
             item
             for item in candidate_pool
             if score_relevance(query, item) >= 12
-        ][:10]
+        ]
 
-        self._add_candidate_evidence(analyzable_candidates)
+        self._add_candidate_evidence(candidates_to_inspect)
 
-        ranked = rank_candidates(query, candidate_pool)
+        ranked = rank_candidates(query, candidates_to_inspect)
+        for item in ranked:
+            emit(
+                logger,
+                "repository_candidate_ranked",
+                stage="repository_discovery",
+                repository_id=item.get("id"),
+                repository=item.get("full_name"),
+                relevance_score=item.get("relevance_score"),
+                analyzability_score=item.get("analyzability_score"),
+                evidence_readiness=item.get("evidence_readiness"),
+                inspection_state=item.get("tree_inspection_state"),
+                tree_truncated=item.get("tree_truncated"),
+                inspected_file_count=item.get("inspected_file_count"),
+                meaningful_source_file_count=item.get("meaningful_source_file_count"),
+                ranking_score=item.get("ranking_score"),
+                readiness_reason=item.get("readiness_reason"),
+            )
         return [
             self._to_search_item(item)
             for item in ranked[:limit]
         ]
 
     def _add_candidate_evidence(self, candidates: list[dict]) -> None:
-        """Inspect repository tree paths for promising candidates."""
+        """Inspect every candidate before comparing repository readiness."""
         if not candidates:
             return
+
+        for candidate in candidates:
+            candidate["_tree_inspection_state"] = "not_inspected"
+            candidate["_tree_truncated"] = False
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -196,15 +219,22 @@ class GitHubService:
 
                 try:
                     paths = future.result()
-                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                except Exception as exc:
+                    candidate["_tree_inspection_state"] = "inspection_failed"
+                    candidate["_tree_inspection_reason"] = type(exc).__name__
+                    candidate["_repo_paths"] = None
+                    candidate["_readme_present"] = False
                     logger.warning(
-                        "Could not inspect candidate repository tree %s: %s",
+                        "Could not inspect candidate repository tree %s (%s)",
                         candidate.get("full_name", candidate.get("name")),
-                        exc,
+                        type(exc).__name__,
                     )
-                    paths = []
+                    continue
 
                 candidate["_repo_paths"] = paths
+                candidate["_tree_inspection_state"] = "inspected"
+                candidate.setdefault("_tree_truncated", False)
+                candidate["_tree_reported_count"] = candidate.get("_tree_reported_count", len(paths))
                 candidate["_readme_present"] = any(
                     Path(path).name.lower().startswith(README_PREFIX)
                     for path in paths
@@ -220,7 +250,7 @@ class GitHubService:
         branch = str(candidate.get("default_branch") or "").strip()
 
         if not full_name or "/" not in str(full_name) or not branch:
-            return []
+            raise ValueError("Repository identity or default branch is unavailable")
 
         url = (
             f"https://api.github.com/repos/{full_name}/git/trees/"
@@ -232,13 +262,22 @@ class GitHubService:
             response.raise_for_status()
             payload = response.json()
 
-        tree = payload.get("tree", []) if isinstance(payload, dict) else []
+        if not isinstance(payload, dict) or not isinstance(payload.get("tree"), list):
+            raise ValueError("GitHub tree response has no tree list")
+        tree = payload["tree"]
+        candidate["_tree_truncated"] = bool(payload.get("truncated"))
+        file_entries = [
+            item for item in tree
+            if isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and item.get("type", "blob") == "blob"
+        ]
+        candidate["_tree_truncated"] = bool(payload.get("truncated")) or len(file_entries) > 5000
+        candidate["_tree_reported_count"] = len(file_entries)
 
         return [
             str(item["path"])
-            for item in tree[:5000]
-            if isinstance(item, dict)
-            and isinstance(item.get("path"), str)
+            for item in file_entries[:5000]
         ]
 
     def _to_search_item(self, item: dict) -> SearchRepositoryItem:
@@ -283,9 +322,19 @@ class GitHubService:
                 for topic in topics
                 if isinstance(topic, str) and topic
             ],
-            relevance_score=item.get("relevance_score", 0),
-            analyzability_score=item.get("analyzability_score", 0),
-            ranking_score=item.get("ranking_score", 0),
+            # Direct URL lookups bypass idea-search relevance scoring; retain
+            # the legacy numeric field with a neutral value in that path.
+            relevance_score=item.get("relevance_score") if item.get("relevance_score") is not None else 0,
+            analyzability_score=item.get("analyzability_score"),
+            ranking_score=item.get("ranking_score"),
+            tree_inspection_state=item.get("tree_inspection_state", "not_assessed"),
+            tree_truncated=item.get("tree_truncated"),
+            evidence_readiness=item.get("evidence_readiness", "not_assessed"),
+            readiness_reason=item.get("readiness_reason"),
+            repository_type=item.get("repository_type"),
+            inspected_file_count=item.get("inspected_file_count"),
+            tree_reported_file_count=item.get("tree_reported_file_count"),
+            meaningful_source_file_count=item.get("meaningful_source_file_count"),
         )
 
     @staticmethod

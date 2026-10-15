@@ -144,8 +144,16 @@ export interface SimilarRepo {
   similarity?: number;
   similarity_breakdown?: Record<string, number>;
   relevance_score?: number;
-  analyzability_score?: number;
-  ranking_score?: number;
+  analyzability_score?: number | null;
+  ranking_score?: number | null;
+  tree_inspection_state?: string;
+  tree_truncated?: boolean;
+  evidence_readiness?: string;
+  readiness_reason?: string;
+  repository_type?: string;
+  inspected_file_count?: number;
+  tree_reported_file_count?: number;
+  meaningful_source_file_count?: number;
   reason?: string;
   project_type?: string;
   architecture?: string;

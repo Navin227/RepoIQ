@@ -143,6 +143,71 @@ def test_model_preserves_and_downgrades_contradictory_claims(tmp_path):
     assert all(claim.state == "inferred" and claim.confidence < 0.5 for claim in model.claims)
 
 
+def test_paraphrased_behavior_with_verified_implementation_signal_is_retained(tmp_path):
+    from app.services.repository_model import RepositoryClaim
+
+    source = "def receive_document(request):\n    upload = request.files[0]\n    storage.save(upload)\n    return True\n"
+    (tmp_path / "uploads.py").write_text(source, encoding="utf-8")
+    ref = EvidenceReference(path="uploads.py", start_line=1, end_line=4, commit_sha="sha", excerpt=source.strip())
+    claim = RepositoryClaim(text="The endpoint accepts uploaded documents and persists them", category="feature", confidence=0.05, state="inferred", evidence=[ref])
+    model = RepositoryModel(commit_sha="sha", claims=[claim]).validate_sources(RepositoryRetrieval(tmp_path))
+
+    assert model.claims[0].state == "inferred"
+    assert model.claims[0].confidence > model.claims[0].model_confidence
+    assert model.claims[0].model_confidence == 0.05
+    assert model.validation_diagnostics["claims_before"] == 1
+    assert model.validation_diagnostics["claims_after"] == 1
+
+
+def test_invalid_reference_does_not_discard_another_valid_reference(tmp_path):
+    from app.services.repository_model import RepositoryClaim
+
+    source = "def create_order():\n    return save_order()\n"
+    (tmp_path / "orders.py").write_text(source, encoding="utf-8")
+    claim = RepositoryClaim(
+        text="create_order calls save_order",
+        state="confirmed",
+        confidence=0.9,
+        category="module",
+        evidence=[
+            EvidenceReference(path="orders.py", start_line=1, end_line=2, commit_sha="sha", excerpt=source.strip()),
+            EvidenceReference(path="missing.py", start_line=1, end_line=1, commit_sha="sha", excerpt="anything"),
+        ],
+    )
+    model = RepositoryModel(commit_sha="sha", claims=[claim]).validate_sources(RepositoryRetrieval(tmp_path))
+
+    assert model.claims[0].state == "confirmed"
+    assert [ref.path for ref in model.claims[0].evidence] == ["orders.py"]
+    assert model.claims[0].validation_reasons[0]["reason_code"] == "path_not_in_repository"
+    assert model.validation_diagnostics["evidence_references_before"] == 2
+    assert model.validation_diagnostics["evidence_references_after"] == 1
+
+
+def test_source_path_case_difference_is_resolved_without_weakening_excerpt_check(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "Orders.py").write_text("def create_order():\n    return True\n", encoding="utf-8")
+    source = RepositoryRetrieval(tmp_path).read("SRC/orders.PY", 1, 2)
+    assert source["content"].startswith("def create_order")
+
+
+def test_unsupported_claim_is_rejected_with_stable_reason_and_model_confidence(tmp_path):
+    from app.services.repository_model import RepositoryClaim
+
+    text = "def read_settings():\n    return config.value\n"
+    (tmp_path / "settings.py").write_text(text, encoding="utf-8")
+    claim = RepositoryClaim(
+        text="This service processes cryptocurrency payroll and sends payouts",
+        category="feature", state="confirmed", confidence=0.99,
+        evidence=[EvidenceReference(path="settings.py", start_line=1, end_line=2, commit_sha="sha", excerpt=text.strip())],
+    )
+    model = RepositoryModel(commit_sha="sha", claims=[claim]).validate_sources(RepositoryRetrieval(tmp_path))
+
+    assert model.claims[0].state == "rejected"
+    assert model.claims[0].confidence < 0.2
+    assert model.claims[0].model_confidence == 0.99
+    assert model.claims[0].validation_reasons[-1]["reason_code"] == "insufficient_semantic_support"
+
+
 def test_readme_bytes_preserve_crlf_markdown_and_links(tmp_path):
     from app.services.github_service import GitHubService
 

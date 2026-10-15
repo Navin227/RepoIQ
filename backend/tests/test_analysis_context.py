@@ -52,8 +52,20 @@ def test_context_batches_are_bounded_and_manifest_marks_omissions(monkeypatch, t
     assert calls
     assert all(len(batch["files"]) <= 1 for batch in calls)
     assert bundle["coverage_manifest"]["commit_sha"] == "abc"
-    assert bundle["coverage_manifest"]["inspected_count"] == 2
-    assert bundle["coverage_manifest"]["omitted_count"] == 1
+    assert bundle["coverage_manifest"]["inspected_count"] == 3
+    assert bundle["coverage_manifest"]["partially_inspected_count"] >= 2
+    assert all(
+        entry["status"] in {"fully_inspected", "partially_inspected"}
+        and entry["gemma_processed"]
+        and entry["line_ranges_supplied"]
+        for entry in bundle["coverage_manifest"]["files"]
+        if entry["path"] in {"main.py", "large.py", "zipped.py"}
+    )
+    for entry in bundle["coverage_manifest"]["files"]:
+        if entry["status"] == "partially_inspected":
+            assert entry["reason"] == "bounded_excerpt_policy"
+            assert entry["omitted_line_ranges"]
+            assert entry["line_ranges_supplied"]
     assert bundle["source_excerpts"][0]["path"] == "main.py"
     assert bundle["limitations"]["unresolved_questions"]
     assert bundle["limitations"]["conflicting_findings"]
@@ -126,3 +138,88 @@ def test_recommendations_need_valid_covered_source_evidence(tmp_path):
         report, RepositoryRetrieval(tmp_path), {"files": [{"path": "app.py", "status": "inspected"}]}
     )
     assert [item["issue"] for item in validated["recommendations"]] == ["verified"]
+
+
+def test_python_relative_and_javascript_alias_imports_are_traversed(tmp_path):
+    (tmp_path / "src" / "api").mkdir(parents=True)
+    (tmp_path / "src" / "services").mkdir()
+    (tmp_path / "src" / "api" / "main.py").write_text("from ..services import orders\nif __name__ == '__main__': run()\n", encoding="utf-8")
+    (tmp_path / "src" / "services" / "orders.py").write_text("def create_order(): pass\n", encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text(json.dumps({"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["web/*"]}}}), encoding="utf-8")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "App.tsx").write_text("import { api } from '@/api/client'; export default function App() {}\n", encoding="utf-8")
+    (tmp_path / "web" / "api").mkdir()
+    (tmp_path / "web" / "api" / "client.ts").write_text("export const api = {};\n", encoding="utf-8")
+
+    manifest, _ = context.build_inventory(tmp_path, "abc", 10_000)
+    records = {entry["path"]: entry for entry in manifest["files"]}
+    assert records["src/api/main.py"]["relationships"] == ["src/services/orders.py"]
+    assert records["web/App.tsx"]["relationships"] == ["web/api/client.ts"]
+    assert records["src/services/orders.py"]["important_to_execution_path"] is True
+
+
+def test_large_file_excerpt_includes_late_function_and_true_line_numbers(tmp_path):
+    lines = [f"value_{i} = {i}" for i in range(1, 3000)]
+    lines[-3:] = ["def late_critical_handler():", "    return 'late evidence'", ""]
+    excerpt_ranges = context._selected_ranges("\n".join(lines), 1000, True)
+    assert any("late_critical_handler" in item["content"] for item in excerpt_ranges)
+    assert max(item["end_line"] for item in excerpt_ranges) == len("\n".join(lines).splitlines())
+    assert all(item["start_line"] >= 1 for item in excerpt_ranges)
+
+
+def test_cross_batch_findings_consolidate_and_flag_unsupported_gemma_paths(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("def main():\n    return worker()\n", encoding="utf-8")
+    (tmp_path / "worker.py").write_text("def worker():\n    return True\n", encoding="utf-8")
+    monkeypatch.setattr(context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(context.settings, "context_batch_files", 1)
+    calls = []
+
+    def fake_chat(_key, _model, messages):
+        data = json.loads(messages[1]["content"].split("\n", 1)[1])
+        path = data["files"][0]["path"]
+        calls.append(path)
+        return json.dumps({"purpose": "shared purpose", "modules": [{"name": path}], "relationships": [{"from": "main.py", "to": "worker.py"}], "evidence_paths": [path, "made-up.py"]})
+
+    monkeypatch.setattr(context, "_chat", fake_chat)
+    bundle = context.prepare_context({}, {}, tmp_path, "abc", {})
+    assert len(calls) == 2
+    assert len(bundle["repository_map"]["modules"]) == 2
+    assert bundle["repository_map"]["unsupported_evidence_paths"] == ["made-up.py"]
+    assert bundle["coverage_manifest"]["coverage"]["status"] == "sufficient"
+
+
+def test_insufficient_total_context_budget_records_omissions(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "service.py").write_text("def service():\n    return 2\n", encoding="utf-8")
+    monkeypatch.setattr(context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(context.settings, "context_token_budget", 256)
+    monkeypatch.setattr(context.settings, "context_per_file_token_budget", 128)
+    monkeypatch.setattr(context, "_chat", lambda *args: json.dumps({"purpose": "test"}))
+    with pytest.raises(RuntimeError, match="no readable files"):
+        context.prepare_context({}, {}, tmp_path, "abc", {})
+
+
+def test_unreadable_file_is_distinct_and_relationship_gaps_are_documented(monkeypatch, tmp_path):
+    (tmp_path / "Main.java").write_text("class Main { public static void main(String[] args) {} }", encoding="utf-8")
+    (tmp_path / "other.cs").write_text("class Other {}", encoding="utf-8")
+    original = context.Path.read_bytes
+
+    def failing_read(path):
+        if path.name == "other.cs":
+            raise OSError("unavailable")
+        return original(path)
+
+    monkeypatch.setattr(context.Path, "read_bytes", failing_read)
+    manifest, _ = context.build_inventory(tmp_path, "abc", 10_000)
+    entries = {entry["path"]: entry for entry in manifest["files"]}
+    assert entries["other.cs"]["status"] == "unreadable"
+    assert "relationship_extraction_unsupported:.java" in manifest["unsupported_relationship_extraction"]
+
+
+def test_finding_caps_preserve_high_priority_and_report_truncation():
+    findings = [{"purpose": "x" * 9000, "subsystems": [{"name": f"normal-{i}", "priority": "low"} for i in range(110)] + [{"name": "critical", "priority": "critical"}]}]
+    merged = context._merge_findings(findings, set())
+    assert len(merged["subsystems"]) == 100
+    assert merged["subsystems"][0]["name"] == "critical"
+    assert merged["truncated_categories"]["subsystems"] == 11
+    assert merged["purpose_truncated_chars"] == 1000

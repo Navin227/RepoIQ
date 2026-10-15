@@ -3,6 +3,8 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
+from app.config import settings
+
 
 DOMAIN_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "file manager": (
@@ -174,77 +176,78 @@ def score_relevance(query: str, candidate: dict[str, Any]) -> float:
     return round(min(100.0, score), 2)
 
 
+def classify_repository_type(paths: list[str], language: str | None = None) -> str:
+    normalized = [str(path).replace("\\", "/") for path in paths if isinstance(path, str)]
+    source = [path for path in normalized if PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES]
+    manifests = sum(PurePosixPath(path).name.lower() in MANIFEST_NAMES for path in normalized)
+    roots = {PurePosixPath(path).parts[0].lower() for path in normalized if len(PurePosixPath(path).parts) > 1}
+    infra = sum(PurePosixPath(path).name.lower() in INFRASTRUCTURE_NAMES or path.lower().endswith((".tf", ".tfvars")) or path.lower().startswith((".github/workflows/", "k8s/", "kubernetes/")) for path in normalized)
+    if manifests >= 2 or len(roots & {"apps", "packages", "services", "frontend", "backend"}) >= 3:
+        return "monorepo"
+    if infra >= 2 and len(source) < 2:
+        return "infrastructure"
+    if any(PurePosixPath(p).suffix.lower() in {".tsx", ".jsx", ".vue", ".svelte"} for p in source):
+        return "frontend_application"
+    if any(part in {"lib", "libs"} for path in source for part in PurePosixPath(path).parts[:-1]):
+        return "library"
+    if manifests and source and not any(PurePosixPath(p).name.lower() in {"main.py", "app.py", "__main__.py", "main.ts", "main.tsx", "index.ts", "index.tsx", "index.js", "index.jsx", "server.py", "server.ts", "manage.py"} for p in source) and not any(FUNCTIONAL_PATH_TERMS.search(p) for p in source):
+        return "library"
+    return "application"
+
+
 def score_analyzability(
     paths: list[str],
     readme_present: bool = False,
     scan: dict[str, Any] | None = None,
+    repository_type: str | None = None,
 ) -> float:
-    normalized_paths = [
+    """Heuristic readiness score; these weights are configurable, not calibrated.
+
+    README and manifests describe a project but cannot substitute for inspected
+    implementation. Generated/vendor paths are excluded from all file counts.
+    """
+    ignored = {".git", "node_modules", "vendor", "dist", "build", "coverage", ".next", ".nuxt", ".venv", "venv", "site-packages", "target", "bower_components"}
+    normalized_paths = sorted({
         str(path).replace("\\", "/").strip("/")
         for path in paths
         if isinstance(path, str) and path.strip()
-    ]
+        and not any(part.lower() in ignored for part in PurePosixPath(str(path).replace("\\", "/")).parts[:-1])
+    })
     basenames = [PurePosixPath(path).name.lower() for path in normalized_paths]
-    source_count = sum(
-        PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES
-        for path in normalized_paths
-    )
+    source_paths = [path for path in normalized_paths if PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES]
+    implementation_paths = [path for path in source_paths if not re.search(r"(^|/)(test|tests|__tests__|spec)(/|$)|(^|/)(test_|.*\.(test|spec)\.)", path, re.I)]
     manifest_count = sum(name in MANIFEST_NAMES for name in basenames)
-    meaningful_directories = {
-        path.split("/", 1)[0].lower()
-        for path in normalized_paths
-        if "/" in path
-    }
-    functional_paths = sum(
-        bool(FUNCTIONAL_PATH_TERMS.search(path))
-        for path in normalized_paths
-        if PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES
-    )
-    infrastructure_count = sum(
-        name in INFRASTRUCTURE_NAMES
-        or name.endswith((".tf", ".tfvars"))
-        or path.lower().startswith((".github/workflows/", "k8s/", "kubernetes/"))
-        for path, name in zip(normalized_paths, basenames)
-    )
-    test_count = sum(
-        "test" in path.lower() or "spec" in path.lower()
-        for path in normalized_paths
-        if PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES
-    )
-    data_config_count = sum(
-        any(term in path.lower() for term in (
-            "database", "migration", "storage", "schema", "config",
-        ))
-        for path in normalized_paths
-    )
+    entrypoint_count = sum(PurePosixPath(path).name.lower() in {"main.py", "app.py", "__main__.py", "main.ts", "main.tsx", "index.ts", "index.tsx", "index.js", "index.jsx", "server.py", "server.ts", "manage.py", "lib.rs"} for path in implementation_paths)
+    test_count = len(source_paths) - len(implementation_paths)
+    functional_count = sum(bool(FUNCTIONAL_PATH_TERMS.search(path)) for path in implementation_paths)
+    boundaries = {PurePosixPath(path).parts[-2].lower() if len(PurePosixPath(path).parts) > 1 else "_root" for path in implementation_paths}
+    infra_count = sum(PurePosixPath(path).name.lower() in INFRASTRUCTURE_NAMES or path.lower().endswith((".tf", ".tfvars")) or path.lower().startswith((".github/workflows/", "k8s/", "kubernetes/")) for path in normalized_paths)
+    roots = {PurePosixPath(path).parts[0].lower() for path in normalized_paths if len(PurePosixPath(path).parts) > 1}
+    repository_type = repository_type or classify_repository_type(normalized_paths)
 
-    score = (
-        min(25, source_count * 3)
-        + min(20, manifest_count * 10)
-        + min(12, len(meaningful_directories) * 3)
-        + min(18, functional_paths * 3)
-        + min(12, infrastructure_count * 6)
-        + min(8, test_count * 2)
-        + min(10, data_config_count * 2)
-        + (5 if readme_present else 0)
-    )
-
+    # Heuristic points reward inspected implementation, runnable structure,
+    # manifests, tests, and module boundaries. No points for README presence.
+    score = min(30, len(implementation_paths) * 6)
+    score += min(16, entrypoint_count * 8)
+    score += min(12, manifest_count * 6)
+    score += min(10, test_count * 3)
+    score += min(12, len(boundaries) * 4)
+    score += min(12, functional_count * 3)
+    if repository_type == "infrastructure":
+        score += min(20, infra_count * 8)
+    if repository_type == "library" and implementation_paths and manifest_count:
+        score += 8
+    if repository_type == "frontend_application" and manifest_count and implementation_paths:
+        score += 6
+    if repository_type == "monorepo":
+        score += min(12, max(0, len(roots) - 1) * 3)
     if isinstance(scan, dict):
         source_evidence = scan.get("source_evidence") or {}
         stats = source_evidence.get("stats") if isinstance(source_evidence.get("stats"), dict) else {}
         selected = stats.get("selected_evidence_files", 0)
         routes = stats.get("routes_detected", 0)
-        if isinstance(selected, (int, float)) and selected > 0:
-            score += min(15, int(selected) * 2)
-        if isinstance(routes, (int, float)) and routes > 0:
-            score += min(10, int(routes))
-        capability = source_evidence.get("capability_signals") or []
-        strong_domains = sum(
-            1 for s in capability
-            if isinstance(s, dict) and int(s.get("confidence") or 0) >= 50
-        )
-        score += min(8, strong_domains * 3)
-
+        if isinstance(selected, (int, float)) and selected > 0: score += min(8, int(selected) * 2)
+        if isinstance(routes, (int, float)) and routes > 0: score += min(8, int(routes) * 2)
     return float(min(100, score))
 
 
@@ -361,27 +364,98 @@ def rank_candidates(
         if relevance < relevance_floor:
             continue
         paths = candidate.get("_repo_paths")
-        analysis_score = score_analyzability(
-            paths if isinstance(paths, list) else [],
-            readme_present=bool(candidate.get("_readme_present")),
-        )
-        # Keep relevance dominant, but prefer evidence-rich repositories
-        # among candidates that are genuinely about the requested topic.
-        ranking_score = relevance * 0.65 + analysis_score * 0.35
+        state = candidate.get("_tree_inspection_state")
+        # Direct callers may supply an explicit tree list without the GitHub
+        # service metadata; its presence still means the tree was inspected.
+        if state is None and isinstance(paths, list):
+            state = "inspected"
+        state = state or "not_inspected"
+        truncated = bool(candidate.get("_tree_truncated"))
+        tree_complete = state == "inspected" and not truncated and isinstance(paths, list)
+        repository_type = classify_repository_type(paths if isinstance(paths, list) else [], candidate.get("language")) if tree_complete else None
+        analysis_score = score_analyzability(paths, repository_type=repository_type) if tree_complete else None
+        if not tree_complete:
+            readiness = "partial" if state == "inspected" and truncated else "unknown"
+            readiness_reason = "tree_truncated" if truncated else "tree_inspection_failed" if state == "inspection_failed" else "tree_not_inspected"
+            ranking_score = None
+        else:
+            readiness, readiness_reason = assess_evidence_readiness(
+                paths, bool(candidate.get("_readme_present")), repository_type,
+            )
+            relevance_weight = max(0.0, float(settings.discovery_relevance_weight))
+            analyzability_weight = max(0.0, float(settings.discovery_analyzability_weight))
+            weight_total = relevance_weight + analyzability_weight or 1.0
+            ranking_score = round((relevance * relevance_weight + analysis_score * analyzability_weight) / weight_total, 2)
         candidate["relevance_score"] = relevance
         candidate["analyzability_score"] = analysis_score
-        candidate["ranking_score"] = round(ranking_score, 2)
+        candidate["ranking_score"] = ranking_score
+        candidate["tree_inspection_state"] = state
+        candidate["tree_truncated"] = truncated
+        candidate["evidence_readiness"] = readiness
+        candidate["readiness_reason"] = readiness_reason
+        candidate["repository_type"] = repository_type
+        candidate["inspected_file_count"] = len(paths) if state == "inspected" and isinstance(paths, list) else None
+        candidate["tree_reported_file_count"] = candidate.get("_tree_reported_count", len(paths)) if state == "inspected" and isinstance(paths, list) else None
+        candidate["meaningful_source_file_count"] = _meaningful_source_count(paths) if state == "inspected" and isinstance(paths, list) else None
         ranked.append(candidate)
 
     return sorted(
         ranked,
         key=lambda item: (
-            item["ranking_score"],
-            item["relevance_score"],
-            _safe_popularity(item.get("stargazers_count")),
+            0 if item["tree_inspection_state"] == "inspected" and not item["tree_truncated"] else 1 if item["tree_inspection_state"] == "inspected" else 2,
+            # Keep low-readiness repositories visible, while making the
+            # minimum evidence gate explicit in ordering.
+            {"ready": 0, "limited": 1, "low": 2}.get(item["evidence_readiness"], 3),
+            -(item["ranking_score"] if item["ranking_score"] is not None else -1),
+            -item["relevance_score"],
+            -_safe_popularity(item.get("stargazers_count")),
+            str(item.get("full_name") or item.get("name") or "").casefold(),
         ),
-        reverse=True,
     )
+
+
+def _meaningful_source_count(paths: list[str] | None) -> int:
+    if not isinstance(paths, list):
+        return 0
+    ignored = {".git", "node_modules", "vendor", "dist", "build", "coverage", ".next", ".nuxt", ".venv", "venv", "site-packages", "target", "bower_components"}
+    return sum(
+        1 for path in paths
+        if isinstance(path, str)
+        and PurePosixPath(path).suffix.lower() in SOURCE_SUFFIXES
+        and not any(part.lower() in ignored for part in PurePosixPath(path.replace("\\", "/")).parts[:-1])
+        and not re.search(r"(^|/)(test|tests|__tests__|spec)(/|$)|(^|/)(test_|.*\.(test|spec)\.)", path, re.I)
+    )
+
+
+def assess_evidence_readiness(paths: list[str], readme_present: bool, repository_type: str) -> tuple[str, str]:
+    def readiness(status: str, reason: str) -> tuple[str, str]:
+        if not readme_present:
+            reason += "; README not found"
+        return status, reason
+
+    source_count = _meaningful_source_count(paths)
+    manifest_count = sum(PurePosixPath(path).name.lower() in MANIFEST_NAMES for path in paths)
+    infra_count = sum(PurePosixPath(path).name.lower() in INFRASTRUCTURE_NAMES or path.lower().endswith((".tf", ".tfvars")) or path.lower().startswith((".github/workflows/", "k8s/", "kubernetes/")) for path in paths)
+    entrypoints = sum(PurePosixPath(path).name.lower() in {"main.py", "app.py", "__main__.py", "main.ts", "main.tsx", "index.ts", "index.tsx", "index.js", "index.jsx", "server.py", "server.ts", "manage.py", "lib.rs"} for path in paths)
+    if not paths:
+        return readiness("low", "empty_repository")
+    if source_count == 0 and not (repository_type == "infrastructure" and infra_count >= 2):
+        return readiness("low", "mostly_generated_vendor_or_nonimplementation_files")
+    if repository_type == "infrastructure":
+        if infra_count >= 2: return readiness("ready", "multiple_infrastructure_implementation_files")
+        return readiness("limited", "infrastructure_evidence_is_sparse")
+    if repository_type == "library":
+        if source_count >= 2 and manifest_count: return readiness("ready", "library_source_and_manifest_present")
+        return readiness("limited", "library_has_source_but_limited_package_or_module_evidence")
+    if repository_type == "frontend_application":
+        if source_count >= 2 and (entrypoints or manifest_count): return readiness("ready", "frontend_source_and_application_structure_present")
+        return readiness("limited", "frontend_implementation_evidence_is_sparse")
+    if repository_type == "monorepo":
+        roots = {PurePosixPath(path).parts[0].lower() for path in paths if len(PurePosixPath(path).parts) > 1}
+        if source_count >= 3 and len(roots) >= 2: return readiness("ready", "multiple_implemented_subsystems_found")
+        return readiness("limited", "monorepo_boundaries_or_implementations_are_sparse")
+    if source_count >= 2 and (entrypoints or manifest_count): return readiness("ready", "implementation_and_project_structure_present")
+    return readiness("limited", "source_exists_but_project_structure_is_sparse")
 
 
 def _safe_popularity(value: Any) -> int:
