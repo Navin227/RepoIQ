@@ -16,6 +16,13 @@ test('a diagnosed provider failure remains failed even if partial output exists'
   }), 'failed');
 });
 
+test('a backend failure with complete validation metadata remains failed', () => {
+  assert.equal(normalizeTerminalAnalysisStatus({
+    backendStatus: 'failed', hasUsefulOutput: true,
+    hasValidationMetadata: true, requiredStageFailed: false,
+  }), 'failed');
+});
+
 test('complete output without its evidence model is downgraded to partial, not failed', () => {
   assert.equal(normalizeTerminalAnalysisStatus({
     backendStatus: 'complete', hasUsefulOutput: true,

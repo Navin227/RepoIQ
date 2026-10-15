@@ -17,7 +17,7 @@ export function normalizeTerminalAnalysisStatus(input: {
   // Older APIs sometimes label a response failed despite including a useful
   // report, because validation metadata is missing. Keep that output visible as
   // partial unless diagnostics identify an actual required-stage failure.
-  if (status === 'failed' && input.hasUsefulOutput && !input.requiredStageFailed) return 'partial';
+  if (status === 'failed' && input.hasUsefulOutput && !input.hasValidationMetadata && !input.requiredStageFailed) return 'partial';
   if (['failed', 'unavailable', 'partial'].includes(status)) return status;
   if (!input.hasValidationMetadata) return input.hasUsefulOutput ? 'partial' : 'unavailable';
   return status;
