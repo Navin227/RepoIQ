@@ -43,26 +43,26 @@ class StackDetector:
         files = scan.get("files", [])
         dependencies = scan.get("dependencies", {})
 
-        logger.info(f"🔍 Starting technology detection...")
-        logger.info(f"📁 Files to scan: {len(files)}")
-        logger.info(f"📦 Dependency files found: {len(dependencies)}")
+        logger.debug(f"🔍 Starting technology detection...")
+        logger.debug(f"📁 Files to scan: {len(files)}")
+        logger.debug(f"📦 Dependency files found: {len(dependencies)}")
 
         # Log all discovered package.json files
         package_json_files = [path for path in dependencies.keys() if path.endswith("package.json")]
         if package_json_files:
-            logger.info(f"📦 Found {len(package_json_files)} package.json file(s):")
+            logger.debug(f"📦 Found {len(package_json_files)} package.json file(s):")
             for pj in package_json_files:
-                logger.info(f"   - {pj} (Size: {len(str(dependencies[pj].get('content', '')))} chars)")
+                logger.debug(f"   - {pj} (Size: {len(str(dependencies[pj].get('content', '')))} chars)")
         else:
-            logger.warning("⚠️  No package.json files found!")
+            logger.debug("⚠️  No package.json files found!")
 
         # STAGE 1: Detect Languages
         self._stage1_detect_languages(files)
-        logger.info(f"🔤 Languages detected: {sorted(list(self.languages))}")
+        logger.debug(f"🔤 Languages detected: {sorted(list(self.languages))}")
 
         # STAGE 2: Detect Frameworks and Tools
         self._stage2_detect_technologies(dependencies, files)
-        logger.info(f"🔧 Total technologies detected: {len(self.technologies)}")
+        logger.debug(f"🔧 Total technologies detected: {len(self.technologies)}")
 
         # STAGE 3: Aggregate and Categorize Technologies
         categories = self._stage3_categorize_and_aggregate()
@@ -70,17 +70,17 @@ class StackDetector:
         # Log category summary
         for cat_name, techs in categories.items():
             if techs:
-                logger.info(f"📂 {cat_name.upper()}: {len(techs)} technologies")
+                logger.debug(f"📂 {cat_name.upper()}: {len(techs)} technologies")
                 for tech in techs:
-                    logger.info(f"   - {tech['name']} (found in {tech['count']} file(s))")
+                    logger.debug(f"   - {tech['name']} (found in {tech['count']} file(s))")
             else:
-                logger.warning(f"⚠️  {cat_name.upper()}: EMPTY - No technologies detected in this category")
+                logger.debug(f"⚠️  {cat_name.upper()}: EMPTY - No technologies detected in this category")
 
         # Add flat list for backwards compatibility
         flat = {cat: list({d["name"] for d in techs}) for cat, techs in categories.items()}
         
-        logger.info("🔍 Final Technology Stack Summary:")
-        logger.info(json.dumps(flat, indent=2))
+        logger.debug("🔍 Final Technology Stack Summary:")
+        logger.debug(json.dumps(flat, indent=2))
 
         result = {
             "languages": sorted(list(self.languages)),
@@ -88,7 +88,7 @@ class StackDetector:
             "flat": flat
         }
 
-        logger.info(f"✅ Detection complete. Result: {len(self.languages)} languages, {len(self.technologies)} tech detections")
+        logger.debug(f"✅ Detection complete. Result: {len(self.languages)} languages, {len(self.technologies)} tech detections")
         return result
 
     def _stage1_detect_languages(self, files: list[str]):
@@ -159,7 +159,7 @@ class StackDetector:
                 if isinstance(pkg_data, dict):
                     self._detect_from_package_json(rel_path, pkg_data)
                 else:
-                    logger.warning(f"⚠️  package.json content is not a dict after parsing: {type(pkg_data)}")
+                    logger.debug(f"⚠️  package.json content is not a dict after parsing: {type(pkg_data)}")
 
             elif dep_type == "requirements.txt" and isinstance(content, list):
                 self._detect_from_requirements_txt(rel_path, content)
@@ -345,7 +345,7 @@ class StackDetector:
                 if k not in metadata_keys and isinstance(v, str)
             })
 
-        logger.info(f"📝 Scanning {path}: {len(all_deps)} dependencies found")
+        logger.debug(f"📝 Scanning {path}: {len(all_deps)} dependencies found")
         logger.debug(f"   Deps: {list(all_deps.keys())}")
 
         # Frontend Frameworks

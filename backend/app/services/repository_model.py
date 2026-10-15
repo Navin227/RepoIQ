@@ -6,9 +6,14 @@ from collections import Counter
 import re
 import shutil
 import subprocess
+import time
 from typing import Literal
+import logging
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.services.analysis_diagnostics import emit
+
+logger = logging.getLogger(__name__)
 
 
 ClaimState = Literal["confirmed", "inferred", "unknown", "rejected"]
@@ -92,6 +97,9 @@ class RepositoryModel(BaseModel):
         all_refs = [e for component in self.components for e in component.evidence]
         all_refs += [e for claim in self.claims for e in claim.evidence]
         all_refs += [e for relation in self.relationships for e in relation.evidence]
+        emit(logger, "evidence_validation_started", stage="evidence_validation", commit_sha=self.commit_sha,
+             claim_count=len(self.claims), evidence_reference_count=len(all_refs), component_count=len(self.components),
+             relationship_count=len(self.relationships))
         invalid_refs: set[int] = set()
         for ref in all_refs:
             try:
@@ -105,6 +113,9 @@ class RepositoryModel(BaseModel):
             except (OSError, ValueError) as exc:
                 invalid_refs.add(id(ref))
                 self.evidence_issues.append(f"{ref.path}: {exc}")
+                emit(logger, "evidence_reference_rejected", level=logging.WARNING, stage="evidence_validation",
+                     commit_sha=self.commit_sha, path=ref.path, start_line=ref.start_line, end_line=ref.end_line,
+                     reason=str(exc))
 
         for claim in self.claims:
             if any(id(ref) in invalid_refs for ref in claim.evidence):
@@ -166,6 +177,10 @@ class RepositoryModel(BaseModel):
                     claim = self.claims[index]
                     claim.state = "inferred"
                     claim.confidence = min(claim.confidence, 0.49)
+        state_counts = {state: sum(claim.state == state for claim in self.claims) for state in ("confirmed", "inferred", "unknown", "rejected")}
+        emit(logger, "evidence_validation_completed", stage="evidence_validation", commit_sha=self.commit_sha,
+             claim_state_counts=state_counts, evidence_issue_count=len(self.evidence_issues),
+             contradiction_count=len(self.contradictions), deduplicated_claim_count=len(self.claims))
         return self
 
 
@@ -197,6 +212,8 @@ class RepositoryRetrieval:
     def __init__(self, root: str | Path):
         self.root = Path(root).resolve()
         self._unavailable_languages: set[str] = set()
+        self._unsupported_languages_logged: set[str] = set()
+        self._unsupported_suffixes_logged: set[str] = set()
 
     def _safe_path(self, relative: str) -> Path:
         lexical = self.root / relative
@@ -231,11 +248,16 @@ class RepositoryRetrieval:
                 "content": "\n".join(lines[start - 1:end])}
 
     def search(self, query: str, paths: list[str] | None = None) -> list[dict]:
+        started = time.perf_counter()
         needle = query.casefold()
         results = []
         if not query.strip():
+            emit(logger, "retrieval_skipped_empty_query", level=logging.WARNING, stage="retrieval")
             return results
         rg = shutil.which("rg")
+        rg_completed = False
+        search_backend = "python_fallback"
+        fallback_reason = "ripgrep_unavailable"
         if rg:
             command = [rg, "--line-number", "--no-heading", "--color", "never", "--fixed-strings", "--hidden", "--max-columns", "1000"]
             for excluded in (".git", "node_modules", "vendor", "third_party", "third-party", "dist", "build", "target", ".venv", "venv", "__pycache__", ".next", ".nuxt", ".yarn", ".cache", "coverage", "generated"):
@@ -252,6 +274,8 @@ class RepositoryRetrieval:
             try:
                 completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False)
                 if completed.returncode in (0, 1):
+                    rg_completed = True
+                    search_backend = "ripgrep"
                     for raw in completed.stdout.splitlines():
                         match = re.match(r"^(.+):(\d+):(.*)$", raw)
                         if not match:
@@ -263,11 +287,16 @@ class RepositoryRetrieval:
                             continue
                         from app.services.source_evidence_extractor import redact_secrets
                         results.append({"path": relative, "line": int(number), "start_line": int(number), "end_line": int(number), "text": redact_secrets(line[:1000]), "match_kind": "text"})
-            except (OSError, subprocess.TimeoutExpired):
+                else:
+                    fallback_reason = f"ripgrep_exit_{completed.returncode}"
+            except (OSError, subprocess.TimeoutExpired) as exc:
                 results = []
+                fallback_reason = type(exc).__name__
 
-        if not results:
+        if not rg_completed:
             # Portable fallback for hosts without ripgrep or where the command failed.
+            emit(logger, "retrieval_python_fallback_started", level=logging.WARNING, stage="retrieval",
+                 reason=fallback_reason, query=query)
             candidates = paths if paths is not None else self.inventory()
             for relative in candidates:
                 try:
@@ -299,6 +328,10 @@ class RepositoryRetrieval:
                     parser_by_path[relative] = "text_fallback"
             item.setdefault("language", self.LANGUAGE_BY_SUFFIX.get(Path(relative).suffix.lower()))
             item.setdefault("parser", parser_by_path[relative])
+        emit(logger, "retrieval_completed", stage="retrieval", query=query, duration_ms=round((time.perf_counter() - started) * 1000),
+             backend=search_backend, fallback_reason=fallback_reason if search_backend != "ripgrep" else None, result_count=len(results),
+             files_retrieved=len(matched_paths), ranges=[{"path": item["path"], "start_line": item["start_line"], "end_line": item["end_line"], "kind": item["match_kind"]} for item in results[:20]],
+             ranges_truncated=max(0, len(results) - 20), empty_result=not bool(results))
         return results
 
     def parse(self, relative: str, content: str | None = None) -> dict:
@@ -306,7 +339,16 @@ class RepositoryRetrieval:
         suffix = Path(relative).suffix.lower()
         language = self.LANGUAGE_BY_SUFFIX.get(suffix)
         result = {"language": language, "parser": "text_fallback", "symbols": [], "imports": []}
-        if not language or language in self._unavailable_languages:
+        if not language:
+            if suffix not in self._unsupported_suffixes_logged:
+                emit(logger, "tree_sitter_unsupported_language", level=logging.INFO, stage="tree_sitter_parse",
+                     suffix=suffix or "[none]", fallback="text_search")
+                self._unsupported_suffixes_logged.add(suffix)
+            return result
+        if language in self._unavailable_languages:
+            if language and language not in self._unsupported_languages_logged:
+                emit(logger, "tree_sitter_unavailable", level=logging.WARNING, stage="tree_sitter_parse", language=language, fallback="text_search")
+                self._unsupported_languages_logged.add(language)
             return result
         try:
             from tree_sitter_language_pack import get_parser
@@ -314,8 +356,10 @@ class RepositoryRetrieval:
             text = content if content is not None else self.read(relative)["content"]
             encoded = text.encode("utf-8")
             root = parser.parse(encoded).root_node
-        except Exception:
+        except Exception as exc:
             self._unavailable_languages.add(language)
+            emit(logger, "tree_sitter_parse_failed", level=logging.WARNING, stage="tree_sitter_parse", language=language,
+                 path=relative, exception_type=type(exc).__name__, reason=str(exc), fallback="text_search", exc_info=True)
             return result
         result["parser"] = "tree_sitter"
         symbol_types = {"function_definition", "function_declaration", "method_definition", "class_definition", "class_declaration", "struct_item", "enum_item", "interface_declaration", "type_declaration", "impl_item", "trait_item", "module"}
@@ -336,11 +380,16 @@ class RepositoryRetrieval:
                 if name:
                     result["symbols"].append({"name": name, "text": snippet[:1000], "kind": kind, "start_line": start, "end_line": end})
             stack.extend(reversed(node.named_children))
+        emit(logger, "tree_sitter_parse_completed", level=logging.DEBUG, stage="tree_sitter_parse", language=language, path=relative,
+             symbol_count=len(result["symbols"]), import_count=len(result["imports"]))
         return result
 
 
 def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commit_sha: str) -> RepositoryModel:
     """Build the canonical evidence ledger from the one normalized analysis response."""
+    emit(logger, "repository_model_build_started", stage="repository_model", commit_sha=commit_sha,
+         input_module_count=len(analysis.get("modules", [])) if isinstance(analysis.get("modules"), list) else 0,
+         input_claim_count=len(analysis.get("claims", [])) if isinstance(analysis.get("claims"), list) else 0)
     modules = analysis.get("modules") if isinstance(analysis.get("modules"), list) else []
     components: list[FunctionalComponent] = []
     relationships: list[Relationship] = []
@@ -420,4 +469,8 @@ def build_repository_model(analysis: dict, retrieval: RepositoryRetrieval, commi
             model.claims.append(RepositoryClaim(text=str(item["text"]), subject=str(item.get("subject") or ""), category=str(item.get("category") or "claim"), target_name=str(item.get("target_name") or ""), state="inferred", confidence=float(item.get("confidence", 0.5)), evidence=refs))
         except (TypeError, ValueError) as exc:
             model.evidence_issues.append(f"Invalid claim record: {exc}")
-    return model.validate_sources(retrieval)
+    model = model.validate_sources(retrieval)
+    emit(logger, "repository_model_build_completed", stage="repository_model", commit_sha=commit_sha,
+         module_count=len(model.components), relationship_count=len(model.relationships), claim_count=len(model.claims),
+         evidence_issue_count=len(model.evidence_issues), contradiction_count=len(model.contradictions))
+    return model

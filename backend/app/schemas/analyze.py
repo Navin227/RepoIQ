@@ -1,14 +1,17 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict
 
 
 class AnalyzeRequest(BaseModel):
     repo_url: Optional[str] = None
     local_path: Optional[str] = None
+    analysis_run_id: Optional[str] = Field(default=None, min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class AnalyzeResponse(BaseModel):
     status: str
+    analysis_run_id: Optional[str] = None
+    error_code: Optional[str] = None
     repository_id: Optional[int] = None
     repo_name: Optional[str] = None
     repo_url: Optional[str] = None

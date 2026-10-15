@@ -164,7 +164,8 @@ def test_legacy_fallback_generators_are_retired():
     assert not hasattr(service, "generate_ai_insights")
 
 
-def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch):
+def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
     def fake_analysis(self, metadata, readme, stack, repository_structure, scan):
         return {
             "overview": "GoFile executive overview from Gemini.",
@@ -203,11 +204,17 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch):
 
     repo_path = Path(__file__).resolve().parents[1] / "temp_repos" / "GoFileCloud" / "GoFile"
     client = TestClient(app)
-    response = client.post("/analyze", json={"local_path": str(repo_path)})
+    response = client.post("/analyze", json={"local_path": str(repo_path), "analysis_run_id": "run_gofile_test"},
+                           headers={"X-Analysis-Run-Id": "run_gofile_test"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "success"
+    assert body["analysis_run_id"] == "run_gofile_test"
+    assert '"event":"analysis_request_received"' in caplog.text
+    assert '"event":"repository_model_build_completed"' in caplog.text
+    assert '"event":"response_schema_validated"' in caplog.text
+    assert '"analysis_run_id":"run_gofile_test"' in caplog.text
     assert body["overview"] == "GoFile executive overview from Gemini."
     assert body["modules"][0]["name"] == "Frontend"
     assert "API Gateway" in body["architecture_summary"]
@@ -276,7 +283,7 @@ def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
 
     monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
     monkeypatch.setattr('app.services.llm_service.settings.analysis_debug_logging', True, raising=False)
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
 
     analysis = LLMService().generate_repository_analysis(
         metadata={"full_name": "acme/deploy", "description": "Deployment tooling"},
@@ -287,8 +294,8 @@ def test_llm_service_debug_logging_emits_prompt_boundaries(monkeypatch, caplog):
     )
 
     assert analysis["executive_overview"]["what_is_this_project"][0].startswith("This project")
-    assert "GEMINI_INPUT_START" in caplog.text
-    assert "GEMINI_INPUT_END" in caplog.text
+    assert '"event":"gemini_input_summary"' in caplog.text
+    assert '"event":"gemini_input_debug_preview"' in caplog.text
 
 
 def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
@@ -337,6 +344,24 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
 
     assert analysis["analysis_status"] == "ai_generated"
     assert analysis["ai_insights"] == []
+
+
+def test_llm_service_marks_unresolved_investigation_partial(monkeypatch):
+    captured = {}
+
+    def fake_gemini(self, payload):
+        captured["analysis_run_id"] = payload["analysis_run_id"]
+        return '{"overview":"Evidence-backed report.","modules":[],"architecture":{"summary":"unknown"},"investigation_requests":[{"query":"BillingService","question":"confirm billing workflow"}]}'
+
+    monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
+    result = LLMService().generate_repository_analysis(
+        metadata={"full_name": "acme/example", "analysis_run_id": "run_partial_789"},
+        readme="", stack={}, repository_structure=[], scan={"files": [], "source_evidence": {}},
+    )
+
+    assert captured["analysis_run_id"] == "run_partial_789"
+    assert result["analysis_status"] == "partial"
+    assert result["analysis_evidence"]["investigation_coverage"]["unresolved"]
 
 
 def test_llm_service_drops_architecture_components_without_repo_evidence():

@@ -23,7 +23,8 @@ class ApiNetworkError extends Error {
 const fetchWithDefensiveRetry = async (
   url: string,
   options: RequestInit | undefined,
-  operation: string
+  operation: string,
+  onRetry?: (attempt: number, error: unknown) => void,
 ) => {
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY_MS = 1000;
@@ -39,7 +40,8 @@ const fetchWithDefensiveRetry = async (
         throw error;
       }
 
-      console.warn(
+      if (onRetry) onRetry(attempt, error);
+      else console.warn(
         `[RepoIQ] ${operation} transient network error (attempt ${attempt}/${MAX_ATTEMPTS}); retrying shortly.`
       );
 
@@ -343,10 +345,13 @@ function normalizeSearchRepository(value: unknown): SimilarRepo {
 export interface AnalyzeRepositoryRequest {
   repo_url?: string;
   local_path?: string;
+  analysis_run_id?: string;
 }
 
 export interface AnalyzeRepositoryResponse {
   status: 'success' | 'error';
+  analysis_run_id?: string;
+  error_code?: string;
   repo_name?: string;
   repo_url?: string;
   local_path?: string;
@@ -463,7 +468,12 @@ export async function analyzeRepository(
   data: AnalyzeRepositoryRequest,
   runtimeApiBase?: string | null
 ): Promise<AnalysisResult> {
-  console.log('📡 [API] Requesting analysis:', data);
+  const runId = data.analysis_run_id || crypto.randomUUID();
+  const requestStarted = performance.now();
+  const safeRepoUrl = data.repo_url?.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0];
+  const log = (event: string, fields: Record<string, unknown> = {}) =>
+    console.info('[RepoIQ analysis]', { analysis_run_id: runId, event, ...fields });
+  log('analyze_click_or_request_initiated', { repository_url: safeRepoUrl, has_local_path: Boolean(data.local_path) });
 
   let apiBase: string;
   try {
@@ -473,89 +483,76 @@ export async function analyzeRepository(
       pageOrigin: window.location.origin,
     });
   } catch (error) {
-    return {
-      status: 'error',
-      error: error instanceof Error ? error.message : 'Invalid RepoIQ API URL configuration.',
-    };
+    log('api_configuration_failed', { error: error instanceof Error ? error.message : 'Invalid API configuration' });
+    return { status: 'error', analysis_run_id: runId, error: `Invalid API configuration. Correlation ID: ${runId}` };
   }
 
   if (!apiBase) {
-    return {
-      status: 'error',
-      error:
-        'RepoIQ server URL is unavailable. Start the demo server first.',
-    };
+    log('api_configuration_missing');
+    return { status: 'error', analysis_run_id: runId, error: `RepoIQ server URL is unavailable. Correlation ID: ${runId}` };
   }
 
   try {
-    const response = await fetchWithDefensiveRetry(
-      `${apiBase}/analyze`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(data),
-      },
-      'Analysis'
-    );
-
-    console.log('📡 [API] Analysis status:', response.status);
-
-    if (!response.ok) {
-      return {
-        status: 'error',
-        error: `Analysis failed: RepoIQ API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`,
-      };
+    const response = await fetchWithDefensiveRetry(`${apiBase}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Analysis-Run-Id': runId },
+      body: JSON.stringify({ ...data, analysis_run_id: runId }),
+    }, 'Analysis', (attempt, error) => log('api_retry_scheduled', {
+      attempt, max_attempts: 3, error_type: error instanceof Error ? error.name : 'UnknownError',
+    }));
+    log('api_response_received', { http_status: response.status,
+      duration_ms: Math.round(performance.now() - requestStarted) });
+    let rawResult: unknown;
+    try {
+      rawResult = await response.json();
+    } catch (error) {
+      log('api_response_json_invalid', { http_status: response.status, error_type: error instanceof Error ? error.name : 'UnknownError' });
+      return { status: 'error', analysis_run_id: runId, error: `Invalid analysis response. Correlation ID: ${runId}` };
+    }
+    if (!rawResult || typeof rawResult !== 'object' || Array.isArray(rawResult)) {
+      log('api_response_schema_invalid', { received_type: Array.isArray(rawResult) ? 'array' : typeof rawResult });
+      return { status: 'error', analysis_run_id: runId, error: `Invalid analysis response. Correlation ID: ${runId}` };
+    }
+    const result = rawResult as AnalyzeRepositoryResponse;
+    const responseRunId = result.analysis_run_id || runId;
+    if (!result.analysis_run_id) log('api_response_missing_run_id');
+    if (responseRunId !== runId) log('api_response_run_id_mismatch', { response_run_id: responseRunId });
+    if (typeof result.status !== 'string' || !['success', 'error'].includes(result.status)) {
+      log('api_response_schema_invalid', { missing_or_invalid_field: 'status' });
+      return { status: 'error', analysis_run_id: runId, error: `Invalid analysis response. Correlation ID: ${runId}` };
+    }
+    for (const field of ['analysis_status', 'repository_model', 'commit_sha']) {
+      if (!(field in result)) log('api_response_field_missing', { field });
+    }
+    if (!response.ok || result.status !== 'success') {
+      const code = result.error_code || `http_${response.status}`;
+      log('analysis_failed', { http_status: response.status, error_code: code, analysis_status: result.analysis_status || 'error' });
+      return { status: 'error', analysis_run_id: responseRunId,
+        error: result.message || `Analysis failed. Correlation ID: ${responseRunId}` };
     }
 
-    const result =
-      (await response.json()) as AnalyzeRepositoryResponse;
-
-    console.log('📡 [API] Analysis response:', result);
-
-    if (result.status === 'success') {
-      const keyFeatures = normalizeAiInsights(result);
-
-      return {
-        status: 'success',
-        repoName: result.repo_name,
-        repoUrl: result.repo_url,
-        localPath: result.local_path,
-        readme: result.readme,
-        readmePath: result.readme_path,
-        stack: result.stack,
-        folderStructure: result.folder_structure,
-        projectSummary: result.architecture_summary,
-        keyFeatures,
-        overview: result.overview,
-        executive_overview: result.executive_overview,
-        architecture: result.architecture,
-        architecture_summary: result.architecture_summary,
-        modules: result.modules,
-        similar_repositories: result.similar_repositories,
-        analysis_evidence: result.analysis_evidence ?? {},
-        analysis_status: result.analysis_status,
-        commit_sha: result.commit_sha,
-        repository_model: result.repository_model,
-        ai_insights: result.ai_insights ?? keyFeatures,
-        languages: result.languages,
-      };
-    }
-
+    const analysisStatus = result.analysis_status || 'unknown';
+    const finalState = analysisStatus === 'partial' || analysisStatus === 'degraded' ? analysisStatus : 'success';
+    const keyFeatures = normalizeAiInsights(result);
+    log('api_analysis_result_received', {
+      final_state: finalState, analysis_status: analysisStatus, commit_sha: result.commit_sha,
+      claim_count: Array.isArray(result.repository_model?.claims) ? result.repository_model.claims.length : 0,
+      module_count: Array.isArray(result.modules) ? result.modules.length : 0,
+    });
     return {
-      status: 'error',
-      error: result.message || 'Analysis failed',
+      status: 'success', analysis_run_id: responseRunId, repoName: result.repo_name, repoUrl: result.repo_url,
+      localPath: result.local_path, readme: result.readme, readmePath: result.readme_path,
+      stack: result.stack, folderStructure: result.folder_structure, projectSummary: result.architecture_summary,
+      keyFeatures, overview: result.overview, executive_overview: result.executive_overview,
+      architecture: result.architecture, architecture_summary: result.architecture_summary, modules: result.modules,
+      similar_repositories: result.similar_repositories, analysis_evidence: result.analysis_evidence ?? {},
+      analysis_status: analysisStatus, commit_sha: result.commit_sha, repository_model: result.repository_model,
+      ai_insights: result.ai_insights ?? keyFeatures, languages: result.languages,
     };
   } catch (error) {
-    console.error('❌ [API] Analysis error:', error);
-
-    return {
-      status: 'error',
-      error:
-        error instanceof Error
-          ? error.message
-          : 'Failed to analyze repository',
-    };
+    console.error('[RepoIQ analysis]', { analysis_run_id: runId, event: 'api_request_failed',
+      error_type: error instanceof Error ? error.name : 'UnknownError' });
+    return { status: 'error', analysis_run_id: runId,
+      error: `Analysis request failed. Correlation ID: ${runId}` };
   }
 }

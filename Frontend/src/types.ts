@@ -78,6 +78,7 @@ export interface Repository {
   analysisStatus?: string;
   commitSha?: string;
   repositoryModel?: Record<string, unknown>;
+  analysisRunId?: string;
 }
 
 export interface ArchitectureComponent {
@@ -179,4 +180,5 @@ export interface AnalysisResult {
   repository_model?: Record<string, unknown>;
   languages?: string[]; // Add languages
   error?: string;
+  analysis_run_id?: string;
 }

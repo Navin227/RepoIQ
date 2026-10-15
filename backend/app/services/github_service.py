@@ -11,6 +11,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from app.config import settings
+from app.services.analysis_diagnostics import emit
 from app.schemas.search import SearchRepositoryItem
 from app.services.repository_discovery import (
     build_candidate_queries,
@@ -369,6 +370,8 @@ class GitHubService:
     ) -> dict[str, str]:
         owner, repo_name = self._owner_and_repo(repo_url)
         clone_url = f"https://github.com/{owner}/{repo_name}.git"
+        emit(logger, "repository_clone_started", stage="repository_acquisition", repository=f"{owner}/{repo_name}",
+             clone_cache_status="fresh_clone", target_dir=str(target_dir) if target_dir else None)
 
         if target_dir is not None:
             repo_dir = Path(target_dir)
@@ -419,18 +422,18 @@ class GitHubService:
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
-            logger.error(
-                "Failed to clone repository %s: %s",
-                repo_url,
-                exc.stderr,
-            )
+            emit(logger, "repository_clone_failed", level=logging.ERROR, stage="repository_acquisition",
+                 repository=f"{owner}/{repo_name}", exception_type=type(exc).__name__, reason=exc.stderr or str(exc), exc_info=True)
             raise RuntimeError("Failed to clone repository") from exc
 
         revision = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        emit(logger, "repository_clone_completed", stage="repository_acquisition", repository=f"{owner}/{repo_name}",
+             checkout_path=str(repo_dir), commit_sha=revision, clone_cache_status="cloned_fresh")
         return {
             "repo_name": repo_name,
             "local_path": repo_dir.as_posix(),
             "commit_sha": revision,
+            "status": "cloned_fresh",
         }
 
     def find_readme_path(

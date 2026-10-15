@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from app.services.analysis_diagnostics import emit
 
 logger = logging.getLogger(__name__)
 
@@ -600,20 +601,13 @@ class SourceEvidenceExtractor:
             },
         }
 
-        logger.info(
-            "Repository evidence selection: %s",
-            json.dumps({
-                "discovered_files": files,
-                "discovered_source_files": [
-                    path for path in files if Path(path).suffix.lower() in SOURCE_SUFFIXES
-                ],
-                "source_files_read": successfully_read,
-                "candidate_evidence_files": [cand.path for cand in candidates],
-                "selected_evidence_files": [item["path"] for item in selected],
-                "excluded_files": excluded,
-                **stats,
-            }, ensure_ascii=False),
-        )
+        emit(logger, "source_evidence_selection_completed", stage="source_evidence", **stats,
+             unreadable_file_count=stats["excluded_file_counts"].get("file_unreadable", 0),
+             skipped_file_count=stats["excluded_file_counts"].get("not_selected_by_file_policy", 0),
+             excluded_file_samples=[{"path": item["path"], "reason": item["reason"]} for item in excluded[:25]],
+             excluded_file_samples_truncated=max(0, len(excluded) - 25),
+             selected_paths=[item["path"] for item in selected[:40]],
+             selected_paths_truncated=max(0, len(selected) - 40))
 
         return {
             **buckets,

@@ -287,6 +287,15 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
     setActiveConnectIdx(null);
     setSelectedModuleIdx(0);
     setHoveredNodeIdx(null);
+    console.info('[RepoIQ analysis]', {
+      analysis_run_id: repo.analysisRunId || 'missing',
+      event: 'frontend_result_rendered',
+      repository: repo.fullName,
+      commit_sha: repo.commitSha,
+      final_state: repo.analysisStatus === 'partial' || repo.analysisStatus === 'degraded' ? repo.analysisStatus : 'success',
+      module_count: repo.analysis.businessModules?.length || 0,
+      feature_count: repo.analysis.keyFeatures.length,
+    });
   }, [repo.fullName]);
 
   const overviewData = getNonTechnicalOverview(repo);

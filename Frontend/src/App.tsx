@@ -5,6 +5,7 @@ import Features from './components/Features';
 import DemoInfrastructureCard from './components/DemoInfrastructureCard';
 import SearchResults from './components/SearchResults';
 import AnalysisDashboard from './components/AnalysisDashboard';
+import AnalysisDiagnosticsBoundary from './components/AnalysisDiagnosticsBoundary';
 import { getOrCreateRepository } from './data';
 import {
   analyzeRepository,
@@ -502,8 +503,12 @@ export default function App() {
   const handleAnalyze = async (
     repoUrl: string
   ) => {
+    const analysisRunId = crypto.randomUUID();
+    const analysisLog = (event: string, fields: Record<string, unknown> = {}) =>
+      console.info('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event, ...fields });
+    analysisLog('analyze_button_clicked', { repository_url: repoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
     if (serverStatus !== 'online') {
-      console.warn('[RepoIQ] Analysis blocked: server has not been started.');
+      analysisLog('analysis_blocked', { reason: 'server_not_online' });
       setAnalyzeMessageByUrl(prev => ({
         ...prev,
         [repoUrl]: SERVER_OFFLINE_MESSAGE,
@@ -524,15 +529,15 @@ export default function App() {
         await analyzeRepository(
           {
             repo_url: repoUrl,
+            analysis_run_id: analysisRunId,
           },
           demoApiUrl
         );
 
-      console.log(
-        '📦 handleAnalyze result:',
-        result
-      );
-
+      analysisLog('frontend_result_received', { result_status: result.status,
+        analysis_status: result.analysis_status, error: result.status === 'error' ? result.error : undefined,
+        claim_count: Array.isArray(result.repository_model?.claims) ? result.repository_model.claims.length : 0,
+        module_count: result.modules?.length || 0, commit_sha: result.commit_sha });
       if (result.status === 'success') {
         const fullName =
           getRepoFullName(
@@ -637,6 +642,7 @@ export default function App() {
           analysisStatus: result.analysis_status ?? result.status,
           commitSha: result.commit_sha,
           repositoryModel: result.repository_model,
+          analysisRunId: result.analysis_run_id || analysisRunId,
         });
 
         setAnalyzeMessageByUrl(prev => ({
@@ -646,11 +652,7 @@ export default function App() {
 
         setCurrentTab('analyze');
       } else {
-        console.error(
-          '⚠️ handleAnalyze error status:',
-          result
-        );
-
+        analysisLog('frontend_analysis_failed', { error: result.error || 'Analysis failed' });
         setAnalyzeMessageByUrl(prev => ({
           ...prev,
           [repoUrl]:
@@ -659,11 +661,8 @@ export default function App() {
         }));
       }
     } catch (error) {
-      console.error(
-        '❌ handleAnalyze exception:',
-        error
-      );
-
+      console.error('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event: 'frontend_analysis_exception',
+        error_type: error instanceof Error ? error.name : 'UnknownError' });
       setAnalyzeMessageByUrl(prev => ({
         ...prev,
         [repoUrl]: 'RepoIQ analyze request failed.',
@@ -1774,6 +1773,7 @@ export default function App() {
           'analyze' &&
           analyzedRepo && (
             <div className="animate-fade-in">
+              <AnalysisDiagnosticsBoundary analysisRunId={analyzedRepo.analysisRunId}>
               <AnalysisDashboard
                 repo={
                   analyzedRepo
@@ -1805,6 +1805,7 @@ export default function App() {
                   }
                 }}
               />
+              </AnalysisDiagnosticsBoundary>
             </div>
           )}
 

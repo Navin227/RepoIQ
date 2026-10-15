@@ -12,6 +12,7 @@ from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.source_evidence_extractor import redact_secrets
 from app.services.repository_model import RepositoryRetrieval
+from app.services.analysis_diagnostics import emit
 
 logger = logging.getLogger(__name__)
 MAX_GEMINI_INPUT_TOKENS = 100_000
@@ -31,20 +32,24 @@ class LLMService:
         scan: Dict[str, Any],
         repo_path: str | Path | None = None,
     ) -> Dict[str, Any]:
-        payload = self._build_input_payload(
-            metadata, readme, stack, repository_structure, scan, repo_path=repo_path
-        )
-        payload["analysis_id"] = str(
-            payload.get("analysis_id") or uuid.uuid4().hex[:12]
-        )
-        analysis_id = payload["analysis_id"]
+        analysis_id = str(metadata.get("analysis_run_id") or uuid.uuid4().hex)
+        started = time.perf_counter()
+        emit(logger, "llm_analysis_started", stage="llm_analysis", analysis_run_id=analysis_id,
+             repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"))
+        try:
+            payload = self._build_input_payload(
+                metadata, readme, stack, repository_structure, scan, repo_path=repo_path
+            )
+        except Exception as exc:
+            emit(logger, "llm_input_build_failed", level=logging.ERROR, stage="llm_input_build",
+                 analysis_run_id=analysis_id, exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
+            raise
+        payload["analysis_id"] = analysis_id
+        payload["analysis_run_id"] = analysis_id
 
-        logger.info(
-            "ANALYSIS_REQUEST_START analysis_id=%s repo=%s readme_chars=%s",
-            analysis_id,
-            metadata.get("full_name") or metadata.get("name") or "unknown",
-            len(str(readme or "")),
-        )
+        emit(logger, "analysis_request_start", stage="llm_analysis", analysis_run_id=analysis_id,
+             repository=metadata.get("full_name") or metadata.get("name") or "unknown",
+             commit_sha=metadata.get("commit_sha"), readme_chars=len(str(readme or "")))
 
         try:
             self._log_gemini_input(
@@ -55,10 +60,29 @@ class LLMService:
             generated = None
             retrieval = RepositoryRetrieval(repo_path) if repo_path else None
             for round_number in range(3):
+                payload["investigation_round"] = round_number + 1
+                llm_started = time.perf_counter()
+                emit(logger, "llm_request_started", stage="llm_request", analysis_run_id=analysis_id,
+                     repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
+                     round=round_number + 1, purpose="initial_analysis" if round_number == 0 else "evidence_followup",
+                     evidence_file_count=len(payload.get("selected_source_file_details", [])),
+                     retrieved_match_count=len(payload.get("on_demand_source_matches", [])))
                 response_text = self._generate_with_gemini(payload)
                 self._log_gemini_output(analysis_id, self.provider, response_text)
-                generated = self._parse_json_response(response_text)
+                emit(logger, "llm_response_received", stage="llm_request", analysis_run_id=analysis_id,
+                     round=round_number + 1, duration_ms=round((time.perf_counter() - llm_started) * 1000),
+                     response_chars=len(response_text), response_status="received")
+                try:
+                    generated = self._parse_json_response(response_text)
+                except Exception as exc:
+                    emit(logger, "llm_response_parse_failed", level=logging.ERROR, stage="llm_response_parse",
+                         analysis_run_id=analysis_id, round=round_number + 1, response_chars=len(response_text),
+                         exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
+                    raise
                 requests = generated.get("investigation_requests", []) if isinstance(generated, dict) else []
+                emit(logger, "llm_response_parsed", stage="llm_response_parse", analysis_run_id=analysis_id,
+                     round=round_number + 1, claim_count=len(generated.get("claims", [])),
+                     module_count=len(generated.get("modules", [])), investigation_request_count=len(requests))
                 if not requests:
                     if payload.get("investigation_coverage"):
                         payload["investigation_coverage"] = {
@@ -76,13 +100,26 @@ class LLMService:
                         continue
                     query = str(request.get("query") or "").strip()
                     if query:
+                        previous_match_count = len(retrieved)
+                        emit(logger, "retrieval_query_started", stage="retrieval", analysis_run_id=analysis_id,
+                             repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
+                             round=round_number + 1, query=query)
                         retrieved.extend(retrieval.search(query))
+                        emit(logger, "retrieval_query_completed", stage="retrieval", analysis_run_id=analysis_id,
+                             round=round_number + 1, query=query,
+                             match_count=len(retrieved) - previous_match_count,
+                             empty_result=len(retrieved) == previous_match_count)
                 if not retrieved:
+                    emit(logger, "retrieval_round_empty", level=logging.WARNING, stage="retrieval",
+                         analysis_run_id=analysis_id, round=round_number + 1, query_count=len(requests))
                     payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": 0}
                     break
                 for item in retrieved:
                     item["commit_sha"] = str(metadata.get("commit_sha") or "")
                 payload.setdefault("on_demand_source_matches", []).extend(retrieved)
+                emit(logger, "retrieval_round_completed", stage="retrieval", analysis_run_id=analysis_id,
+                     round=round_number + 1, files_retrieved=len({item["path"] for item in retrieved}),
+                     range_count=len(retrieved), matches_total=len(payload["on_demand_source_matches"]))
                 payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": len(payload["on_demand_source_matches"])}
             if generated is None:
                 raise ValueError("Gemini returned no analysis")
@@ -95,15 +132,19 @@ class LLMService:
             if coverage:
                 payload["analysis_evidence"]["investigation_coverage"] = coverage
             analysis["analysis_status"] = "partial" if coverage.get("unresolved") else "ai_generated"
+            emit(logger, "llm_analysis_completed", stage="llm_analysis", analysis_run_id=analysis_id,
+                 duration_ms=round((time.perf_counter() - started) * 1000), status=analysis["analysis_status"],
+                 claim_count=len(analysis.get("claims", [])), module_count=len(analysis.get("modules", [])))
             self._log_analysis_sections(analysis, degraded=False)
-            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=success", analysis_id)
+            emit(logger, "analysis_request_end", stage="llm_analysis", analysis_run_id=analysis_id,
+                 status=analysis["analysis_status"])
             return analysis
         except Exception as exc:
-            logger.warning(
-                "Analysis degraded: reason=%s analysis_id=%s",
-                self._failure_reason(exc),
-                analysis_id,
-            )
+            emit(logger, "llm_analysis_failed", level=logging.ERROR, stage="llm_analysis",
+                 analysis_run_id=analysis_id, duration_ms=round((time.perf_counter() - started) * 1000),
+                 exception_type=type(exc).__name__, reason=str(exc), exc_info=True)
+            emit(logger, "analysis_degraded", level=logging.WARNING, stage="llm_analysis",
+                 analysis_run_id=analysis_id, error_code=self._failure_reason(exc))
             # Provider failure is a degraded result. Never turn metadata or filenames
             # into a fabricated successful architecture.
             analysis = {
@@ -117,7 +158,8 @@ class LLMService:
                 "analysis_error": self._failure_reason(exc),
             }
             analysis["analysis_evidence"]["investigation_coverage"] = {"status": "degraded", "unresolved": ["LLM analysis failed."]}
-            logger.info("ANALYSIS_REQUEST_END analysis_id=%s status=degraded", analysis_id)
+            emit(logger, "analysis_request_end", stage="llm_analysis", analysis_run_id=analysis_id,
+                 status="degraded", error_code=self._failure_reason(exc))
             return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:
@@ -260,13 +302,8 @@ Rules:
                         raise ValueError("Gemini token counter returned no token count")
                 except Exception as exc:
                     token_count = (len(prompt) + 1) // 2
-                    logger.warning(
-                        "Gemini token counting unavailable: model=%s error_type=%s "
-                        "estimated_tokens=%s",
-                        model_name,
-                        type(exc).__name__,
-                        token_count,
-                    )
+                    emit(logger, "gemini_token_count_unavailable", level=logging.WARNING, stage="gemini_prepare",
+                         analysis_run_id=analysis_id, model=model_name, exception_type=type(exc).__name__, estimated_tokens=token_count)
 
                 details = (
                     provider_payload.get("source_evidence", {}).get(
@@ -313,13 +350,8 @@ Rules:
                             raise ValueError("Gemini token counter returned no token count")
                     except Exception as exc:
                         token_count = (len(prompt) + 1) // 2
-                        logger.warning(
-                            "Gemini token counting unavailable after prioritization: "
-                            "model=%s error_type=%s estimated_tokens=%s",
-                            model_name,
-                            type(exc).__name__,
-                            token_count,
-                        )
+                        emit(logger, "gemini_token_count_unavailable", level=logging.WARNING, stage="gemini_prepare",
+                             analysis_run_id=analysis_id, model=model_name, exception_type=type(exc).__name__, estimated_tokens=token_count)
 
                 if token_count > MAX_GEMINI_INPUT_TOKENS:
                     raise RuntimeError("Gemini input exceeds the bounded token budget")
@@ -335,29 +367,19 @@ Rules:
                     if isinstance(item, dict)
                 )
 
-                logger.info(
-                    "Gemini request prepared: model=%s payload_chars=%s "
-                    "source_chars_selected=%s selected_files=%s excluded_files=%s "
-                    "input_tokens=%s",
-                    model_name,
-                    len(prompt),
-                    selected_chars,
-                    selected_files,
-                    omitted_files,
-                    token_count,
-                )
+                emit(logger, "gemini_request_prepared", stage="gemini_prepare", analysis_run_id=analysis_id,
+                     model=model_name, payload_chars=len(prompt), source_chars_selected=selected_chars,
+                     selected_file_count=selected_files, excluded_file_count=len(omitted_files), input_tokens=token_count)
                 self._log_gemini_input(analysis_id, model_name, prompt)
                 provider_started = time.perf_counter()
                 response = model.generate_content(
                     prompt, generation_config=generation_config
                 )
-                logger.info(
-                    "Gemini provider request: model=%s status=success latency_ms=%s "
-                    "input_tokens=%s",
-                    model_name,
-                    round((time.perf_counter() - provider_started) * 1000),
-                    token_count,
-                )
+                usage = getattr(response, "usage_metadata", None)
+                emit(logger, "gemini_request_completed", stage="gemini_request", analysis_run_id=analysis_id,
+                     model=model_name, status="success", duration_ms=round((time.perf_counter() - provider_started) * 1000),
+                     input_tokens=token_count, prompt_tokens=getattr(usage, "prompt_token_count", None),
+                     output_tokens=getattr(usage, "candidates_token_count", None))
 
                 response_text = getattr(response, "text", "") or ""
                 finish_reason = None
@@ -365,29 +387,22 @@ Rules:
                     finish_reason = response.candidates[0].finish_reason
                 except (AttributeError, IndexError, TypeError):
                     pass
-                logger.info("Gemini response metadata: model=%s finish_reason=%s response_chars=%s", model_name, finish_reason, len(response_text))
+                emit(logger, "gemini_response_metadata", stage="gemini_response", analysis_run_id=analysis_id,
+                     model=model_name, finish_reason=str(finish_reason), response_chars=len(response_text))
                 if not response_text.strip():
                     raise RuntimeError("Gemini returned an empty response")
                 return response_text
 
             except Exception as exc:
                 errors.append(f"{model_name}: {exc}")
-                if provider_started is None:
-                    logger.warning(
-                        "Gemini request preparation failed: model=%s error_type=%s "
-                        "latency_ms=%s",
-                        model_name,
-                        type(exc).__name__,
-                        round((time.perf_counter() - request_started) * 1000),
-                    )
-                else:
-                    logger.warning(
-                        "Gemini provider request: model=%s status=failure "
-                        "error_type=%s latency_ms=%s",
-                        model_name,
-                        type(exc).__name__,
-                        round((time.perf_counter() - provider_started) * 1000),
-                    )
+                rate_limited = any(term in str(exc).lower() for term in ("429", "rate limit", "resource_exhausted"))
+                emit(logger, "gemini_request_failed", level=logging.WARNING, stage="gemini_request",
+                     analysis_run_id=analysis_id, model=model_name,
+                     duration_ms=round((time.perf_counter() - (provider_started or request_started)) * 1000),
+                     exception_type=type(exc).__name__, reason=str(exc), rate_limited=rate_limited,
+                     retrying=bool(model_name != "gemini-1.5-flash"), exc_info=True)
+                if rate_limited:
+                    emit(logger, "gemini_rate_limited", level=logging.WARNING, stage="gemini_request", analysis_run_id=analysis_id, model=model_name)
 
         raise RuntimeError("; ".join(errors))
 
@@ -407,18 +422,10 @@ Rules:
         preview_limit = max(
             1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000)
         )
-        logger.info(
-            "GEMINI_INPUT_START analysis_id=%s model=%s prompt_chars=%s",
-            analysis_id,
-            model_name,
-            len(prompt),
-        )
-        logger.info(
-            "GEMINI_INPUT_PREVIEW analysis_id=%s %s",
-            analysis_id,
-            LLMService._debug_preview(prompt, preview_limit),
-        )
-        logger.info("GEMINI_INPUT_END analysis_id=%s", analysis_id)
+        emit(logger, "gemini_input_summary", stage="gemini_prepare", analysis_run_id=analysis_id,
+             model=model_name, prompt_chars=len(prompt))
+        emit(logger, "gemini_input_debug_preview", level=logging.DEBUG, stage="gemini_prepare",
+             analysis_run_id=analysis_id, preview=LLMService._debug_preview(prompt, preview_limit))
 
     @staticmethod
     def _log_gemini_output(
@@ -429,18 +436,10 @@ Rules:
         preview_limit = max(
             1, int(getattr(settings, "analysis_debug_preview_chars", 12_000) or 12_000)
         )
-        logger.info(
-            "GEMINI_OUTPUT_START analysis_id=%s model=%s response_chars=%s",
-            analysis_id,
-            model_name,
-            len(str(response_text or "")),
-        )
-        logger.info(
-            "GEMINI_OUTPUT_PREVIEW analysis_id=%s %s",
-            analysis_id,
-            LLMService._debug_preview(response_text, preview_limit),
-        )
-        logger.info("GEMINI_OUTPUT_END analysis_id=%s", analysis_id)
+        emit(logger, "gemini_output_summary", stage="gemini_response", analysis_run_id=analysis_id,
+             model=model_name, response_chars=len(str(response_text or "")))
+        emit(logger, "gemini_output_debug_preview", level=logging.DEBUG, stage="gemini_response",
+             analysis_run_id=analysis_id, preview=LLMService._debug_preview(response_text, preview_limit))
 
     @staticmethod
     def _failure_reason(exc: Exception) -> str:
@@ -551,35 +550,23 @@ Rules:
         }
 
         stats = scan_evidence.get("stats", {}) if isinstance(scan_evidence, dict) else {}
-        logger.info(
-            "Analysis payload assembled: %s",
-            {
-                "payload_chars": len(json.dumps(payload, ensure_ascii=False)),
-                "source_chars_selected": stats.get("source_chars_selected", 0),
-                "selected_source_files": semantic_profile.get(
-                    "confidence_signals", {}
-                ).get("source_files_selected"),
-                "routes": stats.get("routes_detected", 0),
-                "symbols": stats.get("symbols_detected", 0),
-                "models": stats.get("models_detected", 0),
-                "semantic_profile_item_counts": {
-                    key: len(value) if isinstance(value, (list, dict)) else 0
-                    for key, value in semantic_profile.items()
-                },
-                "domain_signals": [
-                    item.get("domain")
-                    for item in analysis_evidence.get("domain_signals", [])[:5]
-                    if isinstance(item, dict)
-                ],
-            },
-        )
+        emit(logger, "analysis_payload_assembled", stage="llm_input_build",
+             analysis_run_id=metadata.get("analysis_run_id"), repository=metadata.get("full_name"),
+             commit_sha=metadata.get("commit_sha"), payload_chars=len(json.dumps(payload, ensure_ascii=False)),
+             source_chars_selected=stats.get("source_chars_selected", 0),
+             selected_source_files=semantic_profile.get("confidence_signals", {}).get("source_files_selected"),
+             routes=stats.get("routes_detected", 0), symbols=stats.get("symbols_detected", 0),
+             models=stats.get("models_detected", 0),
+             semantic_profile_item_counts={key: len(value) if isinstance(value, (list, dict)) else 0
+                                           for key, value in semantic_profile.items()})
         return payload
 
     def _collect_repomix_context(self, repo_path: str | Path | None) -> Dict[str, Any]:
         try:
             return RepomixContextService().collect_context(repo_path) or {}
-        except Exception:
-            logger.warning("Repomix context collection failed; falling back to repository scan.", exc_info=True)
+        except Exception as exc:
+            emit(logger, "repomix_context_collection_failed", level=logging.WARNING, stage="repomix_context",
+                 exception_type=type(exc).__name__, reason=str(exc), fallback="repository_scan", exc_info=True)
             return {}
 
     def _build_source_evidence_payload(self, scan: Dict[str, Any]) -> Dict[str, Any]:
