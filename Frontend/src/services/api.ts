@@ -495,7 +495,7 @@ export async function analyzeRepository(
   try {
     const response = await fetchWithDefensiveRetry(`${apiBase}/analyze`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Analysis-Run-Id': runId },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...data, analysis_run_id: runId }),
     }, 'Analysis', (attempt, error) => log('api_retry_scheduled', {
       attempt, max_attempts: 3, error_type: error instanceof Error ? error.name : 'UnknownError',
