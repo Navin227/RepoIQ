@@ -347,6 +347,8 @@ function normalizeSearchRepository(value: unknown): SimilarRepo {
       : typeof repo.ranking_score === 'number' && Number.isFinite(repo.ranking_score)
         ? repo.ranking_score
       : undefined,
+    ranking_adjustment: typeof repo.ranking_adjustment === 'number' ? repo.ranking_adjustment : undefined,
+    comparable_relevance_cohort: typeof repo.comparable_relevance_cohort === 'boolean' ? repo.comparable_relevance_cohort : undefined,
     tree_inspection_state: asString(repo.tree_inspection_state),
     tree_truncated: typeof repo.tree_truncated === 'boolean' ? repo.tree_truncated : undefined,
     evidence_readiness: asString(repo.evidence_readiness),
@@ -511,7 +513,8 @@ export async function searchRepositories(
 
 export async function analyzeRepository(
   data: AnalyzeRepositoryRequest,
-  runtimeApiBase?: string | null
+  runtimeApiBase?: string | null,
+  signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   const runId = data.analysis_run_id || crypto.randomUUID();
   const requestStarted = performance.now();
@@ -549,13 +552,17 @@ export async function analyzeRepository(
         JSON.stringify({ ...data, analysis_run_id: runId })
       ).length,
     });
-    const response = await fetchWithDefensiveRetry(`${apiBase}/analyze`, {
+    // A POST may already have started expensive work; retrying on a lost
+    // response can create duplicate analyses. Retry remains for safe GETs.
+    const requestOptions: RequestInit = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...data, analysis_run_id: runId }),
-    }, 'Analysis', (attempt, error) => log('api_retry_scheduled', {
-      attempt, max_attempts: 3, error_type: error instanceof Error ? error.name : 'UnknownError',
-    }));
+      signal,
+    };
+    const response = await fetch(`${apiBase}/analyze`, usesDevelopmentApiBaseOverride()
+      ? { ...requestOptions, credentials: 'include' }
+      : requestOptions);
     log('api_response_received', { http_status: response.status,
       duration_ms: Math.round(performance.now() - requestStarted) });
     let rawResult: unknown;
@@ -614,16 +621,12 @@ export async function analyzeRepository(
 
     const hasValidatedModel = Boolean(
       result.analysis_run_id && result.commit_sha && result.repository_model &&
-      ['complete', 'success', 'ai_generated', 'partial', 'degraded'].includes(result.analysis_status || '')
+      ['complete', 'success', 'ai_generated', 'partial', 'unavailable', 'failed', 'degraded'].includes(result.analysis_status || '')
     );
-    const analysisStatus = result.analysis_status || 'partial';
-    const finalState = !hasValidatedModel
-      ? 'partial'
-      : analysisStatus === 'degraded'
-        ? 'degraded'
-        : analysisStatus === 'partial'
-          ? 'partial'
-          : 'success';
+    const rawAnalysisStatus = result.analysis_status || 'failed';
+    const analysisStatus = ['success', 'ai_generated'].includes(rawAnalysisStatus) ? 'complete'
+      : rawAnalysisStatus === 'degraded' || rawAnalysisStatus === 'error' ? 'failed' : rawAnalysisStatus;
+    const finalState = !hasValidatedModel ? 'failed' : analysisStatus;
     if (!hasValidatedModel) {
       log('api_response_incomplete_analysis_metadata', {
         missing_fields: [
@@ -657,6 +660,8 @@ export async function analyzeRepository(
     console.error('[RepoIQ analysis]', { analysis_run_id: runId, event: 'api_request_failed',
       error_type: error instanceof Error ? error.name : 'UnknownError' });
     return { status: 'error', analysis_run_id: runId,
-      error: `Analysis request failed. Correlation ID: ${runId}` };
+      error: signal?.aborted
+        ? `Analysis timed out before a result was received. Correlation ID: ${runId}`
+        : `Analysis request failed. Correlation ID: ${runId}` };
   }
 }

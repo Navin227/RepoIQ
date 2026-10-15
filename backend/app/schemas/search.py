@@ -17,6 +17,8 @@ class SearchRepositoryItem(BaseModel):
     relevance_score: float = 0
     analyzability_score: float | None = None
     ranking_score: float | None = None
+    ranking_adjustment: float | None = None
+    comparable_relevance_cohort: bool | None = None
     tree_inspection_state: Literal["inspected", "inspection_failed", "not_inspected", "not_assessed"] = "not_assessed"
     tree_truncated: bool | None = None
     evidence_readiness: Literal["ready", "limited", "low", "partial", "unknown", "not_assessed"] = "not_assessed"

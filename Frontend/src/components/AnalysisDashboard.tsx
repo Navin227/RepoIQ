@@ -496,8 +496,8 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
               <ExternalLink className="h-3.5 w-3.5" />
               <span>GitHub Link</span>
             </a>
-            <span className={`inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium ${repo.analysisStatus === 'ai_generated' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
-              {repo.analysisStatus === 'ai_generated' ? 'Evidence analysis complete' : `Analysis ${repo.analysisStatus || 'status unavailable'}`}
+            <span className={`inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium ${['complete', 'ai_generated'].includes(repo.analysisStatus || '') ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : repo.analysisStatus === 'unavailable' || repo.analysisStatus === 'failed' ? 'border-red-400/20 bg-red-400/10 text-red-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
+              {['complete', 'ai_generated'].includes(repo.analysisStatus || '') ? 'Evidence analysis complete' : `Analysis ${repo.analysisStatus || 'status unavailable'}`}
             </span>
           </div>
           <p className="text-sm text-gray-400 mt-2 max-w-2xl font-sans leading-relaxed">
@@ -646,32 +646,6 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
               )) : (
                 <p className="text-sm text-gray-400 col-span-full">{UNKNOWN_EVIDENCE}</p>
               )}
-            </div>
-          </div>
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.08] p-6">
-              <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">Typical Use Cases</h4>
-              <div className="space-y-3">
-                {executiveOverview.typical_use_cases.length > 0 ? executiveOverview.typical_use_cases.map((useCase, idx) => (
-                  <div key={idx} className="flex gap-3 rounded-xl bg-black/20 border border-white/[0.04] p-3">
-                    <span className="text-xs font-mono text-[#8B5CF6] font-bold">0{idx + 1}</span>
-                    <p className="text-xs text-gray-300 leading-relaxed">{useCase}</p>
-                  </div>
-                )) : <p className="text-sm text-gray-400">{UNKNOWN_EVIDENCE}</p>}
-              </div>
-            </div>
-
-            <div className="rounded-2xl bg-white/[0.02] border border-white/[0.08] p-6">
-              <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">Who is this For?</h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {executiveOverview.who_is_this_for.length > 0 ? executiveOverview.who_is_this_for.map((audience, idx) => (
-                  <div key={idx} className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4">
-                    <span className="text-xs font-mono text-[#8B5CF6] font-bold block mb-1">0{idx + 1}</span>
-                    <p className="text-xs font-semibold text-gray-200">{audience}</p>
-                  </div>
-                )) : <p className="text-sm text-gray-400 sm:col-span-2">{UNKNOWN_EVIDENCE}</p>}
-              </div>
             </div>
           </div>
 

@@ -27,6 +27,7 @@ from app.utils.repo_scanner import RepoScanner
 from app.utils.git_utils import normalize_github_url
 from app.services.repository_model import RepositoryRetrieval, build_repository_model
 from app.services.analysis_diagnostics import emit, run_context, stage
+from app.services.analysis_status import classify_analysis_status
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -788,7 +789,7 @@ def _run_analysis(
         narratives_before_filter = _narrative_count(ai_analysis["executive_overview"]) + int(overview_before_filter)
 
         analysis_status = ai_analysis.get("analysis_status", "degraded")
-        if analysis_status not in {"ai_generated", "partial", "degraded"}:
+        if analysis_status not in {"complete", "partial", "unavailable", "failed", "ai_generated", "degraded"}:
             analysis_status = "degraded"
 
         model_started = time.perf_counter()
@@ -1003,13 +1004,17 @@ def _run_analysis(
             },
             **filtering_counts,
         }
-        gate = pipeline_diagnostics.get("coverage", {})
+        gate = _as_dict(pipeline_diagnostics.get("coverage"))
         manifest_gate = _as_dict(coverage_manifest.get("coverage"))
-        if manifest_gate.get("status") == "partial" or (isinstance(gate, dict) and gate.get("status") == "partial"):
-            if analysis_status == "ai_generated":
-                analysis_status = "partial"
-            repository_model.coverage["status"] = analysis_status
-
+        classification = classify_analysis_status(
+            ai_analysis,
+            pipeline=pipeline_diagnostics,
+            coverage_gate=manifest_gate or gate,
+            insufficient_inputs=gate.get("status") == "insufficient",
+        )
+        analysis_status = classification["status"]
+        pipeline_diagnostics["status_classification"] = classification
+        repository_model.coverage["status"] = analysis_status
         ai_analysis["analysis_status"] = analysis_status
         pipeline_diagnostics["status"] = analysis_status
         pipeline_diagnostics["analysis_run_id"] = payload.analysis_run_id

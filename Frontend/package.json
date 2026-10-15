@@ -7,7 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "test:api": "node --import tsx --test src/services/api-base.test.ts src/services/readme-links.test.ts src/services/readme-render.test.tsx",
+    "test:api": "node --import tsx --test src/services/api-base.test.ts src/services/readme-links.test.ts src/services/readme-render.test.tsx src/components/search-ranking.test.ts",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

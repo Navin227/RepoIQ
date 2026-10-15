@@ -17,8 +17,7 @@ class Settings(BaseSettings):
     context_max_file_bytes: int = 150_000
     provider_timeout_seconds: int = 45
     provider_retry_count: int = 1
-    discovery_relevance_weight: float = 0.65
-    discovery_analyzability_weight: float = 0.35
+    discovery_readiness_relevance_margin: float = 15.0
     llm_provider: str = "gemini"
     clone_base_dir: str = "/tmp/repoiq"
     enable_async_jobs: bool = False

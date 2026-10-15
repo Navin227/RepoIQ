@@ -192,6 +192,8 @@ class GitHubService:
                 inspected_file_count=item.get("inspected_file_count"),
                 meaningful_source_file_count=item.get("meaningful_source_file_count"),
                 ranking_score=item.get("ranking_score"),
+                ranking_adjustment=item.get("ranking_adjustment"),
+                comparable_relevance_cohort=item.get("comparable_relevance_cohort"),
                 readiness_reason=item.get("readiness_reason"),
             )
         return [
@@ -327,6 +329,8 @@ class GitHubService:
             relevance_score=item.get("relevance_score") if item.get("relevance_score") is not None else 0,
             analyzability_score=item.get("analyzability_score"),
             ranking_score=item.get("ranking_score"),
+            ranking_adjustment=item.get("ranking_adjustment"),
+            comparable_relevance_cohort=item.get("comparable_relevance_cohort"),
             tree_inspection_state=item.get("tree_inspection_state", "not_assessed"),
             tree_truncated=item.get("tree_truncated"),
             evidence_readiness=item.get("evidence_readiness", "not_assessed"),

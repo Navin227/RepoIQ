@@ -146,6 +146,8 @@ export interface SimilarRepo {
   relevance_score?: number;
   analyzability_score?: number | null;
   ranking_score?: number | null;
+  ranking_adjustment?: number | null;
+  comparable_relevance_cohort?: boolean | null;
   tree_inspection_state?: string;
   tree_truncated?: boolean;
   evidence_readiness?: string;

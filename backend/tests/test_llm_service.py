@@ -121,7 +121,7 @@ def test_llm_service_reports_gemini_provider_failure_without_successful_analysis
     )
 
     assert analysis["overview"] == ""
-    assert analysis["analysis_status"] == "degraded"
+    assert analysis["analysis_status"] == "failed"
     assert analysis["analysis_error"] == "gemini_provider_failure"
     assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "failed"
     assert analysis["modules"] == []
@@ -348,17 +348,17 @@ def test_llm_service_tracks_ai_insights_and_status(monkeypatch):
         },
     )
 
-    assert analysis["analysis_status"] == "partial"
+    assert analysis["analysis_status"] == "complete"
     assert analysis["analysis_evidence"]["pipeline_diagnostics"]["gemini_output"]["missing_fields"]
     assert analysis["ai_insights"] == []
 
 
-def test_llm_service_marks_unresolved_investigation_partial(monkeypatch):
+def test_optional_unresolved_investigation_does_not_hide_useful_output(monkeypatch):
     captured = {}
 
     def fake_gemini(self, payload):
         captured["analysis_run_id"] = payload["analysis_run_id"]
-        return '{"overview":"Evidence-backed report.","modules":[],"architecture":{"summary":"unknown"},"investigation_requests":[{"query":"BillingService","question":"confirm billing workflow"}]}'
+        return '{"overview":"Evidence-backed report.","modules":[],"architecture":{"summary":"Requests enter the API and are handled by the service layer."},"investigation_requests":[{"query":"BillingService","question":"confirm billing workflow"}]}'
 
     monkeypatch.setattr(LLMService, "_generate_with_gemini", fake_gemini)
     result = LLMService().generate_repository_analysis(
@@ -367,7 +367,7 @@ def test_llm_service_marks_unresolved_investigation_partial(monkeypatch):
     )
 
     assert captured["analysis_run_id"] == "run_partial_789"
-    assert result["analysis_status"] == "partial"
+    assert result["analysis_status"] == "complete", result["analysis_evidence"]["pipeline_diagnostics"].get("status_classification")
     assert result["analysis_evidence"]["investigation_coverage"]["unresolved"]
 
 
@@ -483,7 +483,7 @@ def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(mo
     assert "coverage_manifest" not in captured
     assert result["analysis_evidence"]["pipeline_diagnostics"]["gemma"]["status"] == "completed"
     assert result["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "completed"
-    assert result["analysis_status"] == "ai_generated"
+    assert result["analysis_status"] == "partial"
 
 
 def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():
@@ -523,7 +523,7 @@ def test_gemma_failure_is_not_hidden_by_a_gemini_fallback(monkeypatch, tmp_path)
         repository_structure=[], scan={"files": ["main.py"], "source_evidence": {}}, repo_path=tmp_path,
     )
     diagnostics = result["analysis_evidence"]["pipeline_diagnostics"]
-    assert result["analysis_status"] == "degraded"
+    assert result["analysis_status"] == "failed"
     assert result["analysis_error"] == "gemma_provider_failure"
     assert diagnostics["gemma"]["status"] == "failed"
     assert diagnostics["gemini"]["status"] == "not_run"
@@ -533,14 +533,14 @@ def test_gemma_failure_is_not_hidden_by_a_gemini_fallback(monkeypatch, tmp_path)
 def test_malformed_and_partial_gemini_outputs_are_distinguished(monkeypatch):
     monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: "{}")
     malformed = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
-    assert malformed["analysis_status"] == "degraded"
+    assert malformed["analysis_status"] == "failed"
     assert malformed["analysis_error"] == "gemini_malformed_output"
     assert malformed["analysis_evidence"]["pipeline_diagnostics"]["failure_stage"] == "gemini_output"
 
     monkeypatch.setattr(LLMService, "_generate_with_gemini", lambda *args: '{"overview":"Partial report"}')
     partial = LLMService().generate_repository_analysis({}, "", {}, [], {"files": [], "source_evidence": {}})
     assert partial["analysis_status"] == "partial"
-    assert partial["analysis_error"] == "gemini_partial_output"
+    assert partial["analysis_evidence"]["pipeline_diagnostics"]["gemini_output"]["status"] == "partial"
 
 
 def test_insufficient_gemma_coverage_is_reported_and_blocks_gemini(monkeypatch, tmp_path):

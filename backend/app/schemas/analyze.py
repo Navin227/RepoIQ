@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-AnalysisStatus = Literal["ai_generated", "partial", "degraded", "error"]
+AnalysisStatus = Literal["complete", "partial", "unavailable", "failed", "ai_generated", "degraded", "error"]
 ResponseStatus = Literal["success", "error"]
 
 

@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Star, GitFork, BookMarked, Terminal, SlidersHorizontal, 
-  ArrowUpDown, ChevronRight, Check, Search, Sparkles, 
+  ChevronRight, Check, Search, Sparkles,
   Clock, Trash2, ChevronDown, ArrowRight 
 } from 'lucide-react';
 import { SimilarRepo } from '../types';
+import { filterSearchResultsInBackendOrder } from './search-ranking';
 
 interface SearchResultsProps {
   query: string;
@@ -21,7 +22,6 @@ interface SearchResultsProps {
 
 export default function SearchResults({ query, results, isLoading, error, analyzingRepoUrl, analyzeMessageByUrl, onAnalyze, onBackToHome, onSearch, apiAvailable }: SearchResultsProps) {
   const [selectedLanguage, setSelectedLanguage] = useState<string>('All');
-  const [sortBy, setSortBy] = useState<'stars' | 'forks' | 'relevance'>('relevance');
 
   // Intelligent local search bar states
   const [localQuery, setLocalQuery] = useState(query && query !== 'Featured Repositories' ? query : '');
@@ -88,17 +88,12 @@ export default function SearchResults({ query, results, isLoading, error, analyz
   const uniqueLanguages = ['All', ...Array.from(new Set(results.map(r => r.language).filter(Boolean)))];
 
   // Apply filters
-  const filteredResults = results.filter(repo => {
+  const filteredResults = filterSearchResultsInBackendOrder(results, repo => {
     if (selectedLanguage !== 'All' && repo.language !== selectedLanguage) return false;
     return true;
   });
 
-  // Apply sorting
-  const sortedAndFilteredResults = [...filteredResults].sort((a, b) => {
-    if (sortBy === 'stars') return b.stars - a.stars;
-    if (sortBy === 'forks') return b.forks - a.forks;
-    return 0; // relevance stays in searched order
-  });
+  // Preserve the evidence-aware ordering returned by the backend.
 
   // Language colors mapping
   const languageColors: Record<string, string> = {
@@ -127,7 +122,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
             Results for: <span className="bg-gradient-to-r from-[#8B5CF6] to-pink-500 bg-clip-text text-transparent font-mono">&quot;{query}&quot;</span>
           </h1>
           <p className="text-sm text-gray-400 mt-1">
-            Found {sortedAndFilteredResults.length} repositories matching your request
+            Found {filteredResults.length} repositories matching your request
           </p>
         </div>
 
@@ -220,30 +215,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
             </div>
           </div>
 
-          {/* Sorter Filter */}
-          <div className="rounded-2xl bg-white/[0.02] border border-white/[0.08] p-5">
-            <div className="flex items-center gap-2 font-bold text-white text-sm tracking-wide font-sans mb-4 uppercase">
-              <ArrowUpDown className="h-4 w-4 text-[#8B5CF6]" />
-              Sort Results
-            </div>
-            
-            <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-black/40 border border-white/[0.05]">
-              {(['relevance', 'stars', 'forks'] as const).map((method) => (
-                <button
-                  key={method}
-                  onClick={() => setSortBy(method)}
-                  className={`py-1.5 rounded-lg text-[10px] font-mono capitalize transition-all cursor-pointer ${
-                    sortBy === method
-                      ? 'bg-[#8B5CF6] text-white font-medium shadow'
-                      : 'text-gray-400 hover:text-white'
-                  }`}
-                >
-                  {method}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* Collapsible Recent Search History Panel */}
           <div className="rounded-2xl bg-white/[0.02] border border-white/[0.08] overflow-hidden" id="explore-history-panel">
             <button 
@@ -315,7 +286,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
               <h3 className="text-base font-bold text-white font-sans">GitHub search failed</h3>
               <p className="text-xs text-gray-400 mt-1">Please try again in a moment.</p>
             </div>
-          ) : sortedAndFilteredResults.length === 0 ? (
+          ) : filteredResults.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-white/[0.08] p-12 text-center">
               <BookMarked className="h-10 w-10 text-gray-500 mx-auto mb-4" />
               <h3 className="text-base font-bold text-white font-sans">No repositories found</h3>
@@ -323,7 +294,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
               <button
                 onClick={() => {
                   setSelectedLanguage('All');
-                  setSortBy('relevance');
                 }}
                 className="mt-4 px-4 py-2 rounded-xl bg-[#8B5CF6] text-xs font-semibold text-white"
               >
@@ -331,7 +301,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
               </button>
             </div>
          ) : (
-  sortedAndFilteredResults.map((repo, idx) => {
+  filteredResults.map((repo, idx) => {
     // Defensive normalization: search results may come from different
     // API/result shapes, so never assume fields are defined.
     const safeFullName = String(
@@ -397,6 +367,14 @@ export default function SearchResults({ query, results, isLoading, error, analyz
             <p className="text-sm text-gray-400 leading-relaxed max-w-2xl font-sans">
               {safeDescription || 'No description available.'}
             </p>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-mono">
+              <span className={`rounded-md border px-2 py-1 ${repo.evidence_readiness === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : repo.evidence_readiness === 'unknown' ? 'border-amber-500/20 bg-amber-500/5 text-amber-300' : 'border-white/10 bg-white/[0.03] text-gray-400'}`}>
+                Analysis evidence: {repo.evidence_readiness || 'unknown'}
+              </span>
+              {typeof repo.relevance_score === 'number' && <span className="text-gray-500">Relevance {repo.relevance_score}</span>}
+              {repo.tree_inspection_state && repo.tree_inspection_state !== 'inspected' && <span className="text-amber-400">Tree {repo.tree_inspection_state.replace('_', ' ')}</span>}
+            </div>
 
             {/* Tag Topics List */}
             {safeTopics.length > 0 && (

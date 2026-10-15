@@ -17,6 +17,7 @@ import {
   Star,
   GitFork,
   BookMarked,
+  Sparkles,
 } from 'lucide-react';
 
 interface DemoStatusReadiness {
@@ -311,6 +312,7 @@ export default function App() {
 
   const [analyzedRepo, setAnalyzedRepo] =
     useState<Repository | null>(null);
+  const analysisRequestRef = useRef<{ runId: string; controller: AbortController } | null>(null);
 
   const [serverStatus, setServerStatus] =
     useState<ServerStatus>('checking');
@@ -503,7 +505,11 @@ export default function App() {
   const handleAnalyze = async (
     repoUrl: string
   ) => {
+    if (analysisRequestRef.current) return;
     const analysisRunId = crypto.randomUUID();
+    const controller = new AbortController();
+    analysisRequestRef.current = { runId: analysisRunId, controller };
+    const timeoutId = window.setTimeout(() => controller.abort(), 5 * 60 * 1000);
     const analysisLog = (event: string, fields: Record<string, unknown> = {}) =>
       console.info('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event, ...fields });
     analysisLog('analyze_button_clicked', { repository_url: repoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
@@ -542,7 +548,8 @@ export default function App() {
             repo_url: repoUrl,
             analysis_run_id: analysisRunId,
           },
-          demoApiUrl
+          demoApiUrl,
+          controller.signal,
         );
 
       analysisLog('frontend_result_received', { result_status: result.status,
@@ -665,7 +672,7 @@ export default function App() {
       } else {
         analysisLog('frontend_analysis_failed', { error: result.error || 'Analysis failed' });
         setAnalyzedRepo(current => current?.analysisRunId === analysisRunId
-          ? { ...current, analysisStatus: 'error', analysisError: result.error || 'Analysis failed.' }
+          ? { ...current, analysisStatus: 'failed', analysisError: result.error || 'Analysis failed.' }
           : current);
         setAnalyzeMessageByUrl(prev => ({
           ...prev,
@@ -678,14 +685,20 @@ export default function App() {
       console.error('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event: 'frontend_analysis_exception',
         error_type: error instanceof Error ? error.name : 'UnknownError' });
       setAnalyzedRepo(current => current?.analysisRunId === analysisRunId
-        ? { ...current, analysisStatus: 'error', analysisError: 'The analysis request failed before a result was received.' }
+        ? { ...current, analysisStatus: 'failed', analysisError: controller.signal.aborted
+          ? 'Analysis timed out before the server returned a result.'
+          : 'The analysis request failed before a result was received.' }
         : current);
       setAnalyzeMessageByUrl(prev => ({
         ...prev,
         [repoUrl]: 'RepoIQ analyze request failed.',
       }));
     } finally {
-      setAnalyzingRepoUrl(null);
+      window.clearTimeout(timeoutId);
+      if (analysisRequestRef.current?.runId === analysisRunId) {
+        analysisRequestRef.current = null;
+        setAnalyzingRepoUrl(null);
+      }
     }
   };
 
@@ -1789,6 +1802,19 @@ export default function App() {
           'analyze' &&
           analyzedRepo && (
             <div className="animate-fade-in">
+              {analyzedRepo.analysisStatus === 'running' ? (
+                <div role="status" aria-live="polite" className="mx-auto max-w-3xl px-6 py-24 text-center">
+                  <Sparkles className="mx-auto mb-5 h-10 w-10 animate-pulse text-violet-400" />
+                  <h1 className="text-2xl font-bold text-white">Preparing repository analysis</h1>
+                  <p className="mt-2 text-sm text-gray-400">RepoIQ is inspecting the repository and preparing its evidence based report. This can take a few minutes.</p>
+                </div>
+              ) : analyzedRepo.analysisStatus === 'failed' || analyzedRepo.analysisStatus === 'error' || analyzedRepo.analysisStatus === 'degraded' ? (
+                <div role="alert" className="mx-auto max-w-3xl px-6 py-24 text-center">
+                  <h1 className="text-2xl font-bold text-white">Analysis could not be completed</h1>
+                  <p className="mt-2 text-sm text-gray-400">{analyzedRepo.analysisError || 'A required analysis stage failed. Try again later.'}</p>
+                  <button onClick={() => setCurrentTab(searchQuery ? 'explore' : 'home')} className="mt-6 rounded-xl border border-white/10 px-4 py-2 text-sm text-gray-200 hover:bg-white/5">Back to search</button>
+                </div>
+              ) : (
               <AnalysisDiagnosticsBoundary analysisRunId={analyzedRepo.analysisRunId}>
               <AnalysisDashboard
                 repo={
@@ -1821,6 +1847,7 @@ export default function App() {
                 }}
               />
               </AnalysisDiagnosticsBoundary>
+              )}
             </div>
           )}
 

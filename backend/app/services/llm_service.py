@@ -12,6 +12,7 @@ from app.services.semantic_profile_builder import build_semantic_repository_prof
 from app.services.source_evidence_extractor import redact_secrets
 from app.services.analysis_diagnostics import emit
 from app.services.analysis_context import ContextPreparationError, prepare_context
+from app.services.analysis_status import classify_analysis_status
 
 logger = logging.getLogger(__name__)
 UNKNOWN = "Unable to confidently determine from repository evidence."
@@ -318,15 +319,13 @@ class LLMService:
             if coverage:
                 payload["analysis_evidence"]["investigation_coverage"] = coverage
             manifest = (payload.get("gemini_coverage_manifest") or context_bundle.get("coverage_manifest", {})) if context_bundle else {}
-            analysis["analysis_status"] = "partial" if (
-                coverage.get("unresolved") or manifest.get("omitted_count") or manifest.get("unreadable_count")
-                or (effective_gate and effective_gate.get("status") != "sufficient")
-                or gemini_output_diagnostic["status"] != "complete"
-                or (payload.get("gemini_generation_diagnostic") or {"status": "complete"}).get("status") != "complete"
-                or bool((payload.get("gemini_input_manifest") or {}).get("omitted_source_ranges"))
-            ) else "ai_generated"
-            if analysis["analysis_status"] == "partial" and gemini_output_diagnostic["status"] != "complete":
-                analysis["analysis_error"] = gemini_output_diagnostic["code"]
+            classification = classify_analysis_status(
+                analysis,
+                pipeline=analysis["analysis_evidence"]["pipeline_diagnostics"],
+                coverage_gate=effective_gate,
+            )
+            analysis["analysis_status"] = classification["status"]
+            analysis["analysis_evidence"]["pipeline_diagnostics"]["status_classification"] = classification
             emit(logger, "llm_analysis_completed", stage="llm_analysis", analysis_run_id=analysis_id,
                  duration_ms=round((time.perf_counter() - started) * 1000), status=analysis["analysis_status"],
                  claim_count=len(analysis.get("claims", [])), module_count=len(analysis.get("modules", [])))
@@ -356,7 +355,7 @@ class LLMService:
                 "architecture": {"architecture_summary": "", "summary": "", "architecture_type": "unknown", "flow": [], "request_lifecycle": [], "components": [], "communication": [], "deployment": "unknown"},
                 "analysis_evidence": payload["analysis_evidence"],
                 "ai_insights": [],
-                "analysis_status": "degraded",
+                "analysis_status": "unavailable" if failure_code == "insufficient_repository_coverage" else "failed",
                 "analysis_error": failure_code,
             }
             if payload.get("gemini_input_manifest"):
@@ -375,9 +374,17 @@ class LLMService:
                 "failure_stage": failure_stage,
                 "failure_code": failure_code,
             }
+            classification = classify_analysis_status(
+                analysis,
+                pipeline=analysis["analysis_evidence"]["pipeline_diagnostics"],
+                coverage_gate=(context_bundle or {}).get("coverage_gate"),
+                insufficient_inputs=failure_code == "insufficient_repository_coverage",
+            )
+            analysis["analysis_status"] = classification["status"]
+            analysis["analysis_evidence"]["pipeline_diagnostics"]["status_classification"] = classification
             analysis["analysis_evidence"]["investigation_coverage"] = {"status": "degraded", "unresolved": [failure_code]}
             emit(logger, "analysis_request_end", stage="llm_analysis", analysis_run_id=analysis_id,
-                 status="degraded", error_code=failure_code)
+                 status=analysis["analysis_status"], error_code=failure_code)
             return analysis
 
     def _generate_with_gemini(self, payload: Dict[str, Any]) -> str:

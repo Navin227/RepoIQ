@@ -377,15 +377,12 @@ def rank_candidates(
         if not tree_complete:
             readiness = "partial" if state == "inspected" and truncated else "unknown"
             readiness_reason = "tree_truncated" if truncated else "tree_inspection_failed" if state == "inspection_failed" else "tree_not_inspected"
-            ranking_score = None
+            ranking_score = relevance
         else:
             readiness, readiness_reason = assess_evidence_readiness(
                 paths, bool(candidate.get("_readme_present")), repository_type,
             )
-            relevance_weight = max(0.0, float(settings.discovery_relevance_weight))
-            analyzability_weight = max(0.0, float(settings.discovery_analyzability_weight))
-            weight_total = relevance_weight + analyzability_weight or 1.0
-            ranking_score = round((relevance * relevance_weight + analysis_score * analyzability_weight) / weight_total, 2)
+            ranking_score = relevance
         candidate["relevance_score"] = relevance
         candidate["analyzability_score"] = analysis_score
         candidate["ranking_score"] = ranking_score
@@ -399,15 +396,41 @@ def rank_candidates(
         candidate["meaningful_source_file_count"] = _meaningful_source_count(paths) if state == "inspected" and isinstance(paths, list) else None
         ranked.append(candidate)
 
+    # Relevance defines the candidate pool and the comparable cohort. Only
+    # promote a fully ready repository over the most relevant result when its
+    # relevance is within the documented, configurable comparison margin.
+    # This is a selection heuristic, not a calibrated probability or quality
+    # score. Unknown/failed inspections keep a relevance-only rank score and
+    # never receive a fabricated analyzability value.
+    if ranked:
+        best_relevance = max(item["relevance_score"] for item in ranked)
+        margin = max(0.0, float(settings.discovery_readiness_relevance_margin))
+        top_candidates = [item for item in ranked if item["relevance_score"] == best_relevance]
+        top_is_ready = any(item["evidence_readiness"] == "ready" for item in top_candidates)
+        if not top_is_ready:
+            for item in ranked:
+                delta = best_relevance - item["relevance_score"]
+                item["comparable_relevance_cohort"] = delta <= margin
+                if item["evidence_readiness"] == "ready" and delta <= margin:
+                    # Lift a ready candidate just above the best-relevance
+                    # baseline, while leaving all out-of-cohort candidates
+                    # relevance-ranked.
+                    item["ranking_adjustment"] = round(delta + 0.01, 2)
+                else:
+                    item["ranking_adjustment"] = 0.0
+                item["ranking_score"] = round(item["relevance_score"] + item["ranking_adjustment"], 2)
+        else:
+            for item in ranked:
+                item["comparable_relevance_cohort"] = best_relevance - item["relevance_score"] <= margin
+                item["ranking_adjustment"] = 0.0
+
     return sorted(
         ranked,
         key=lambda item: (
-            0 if item["tree_inspection_state"] == "inspected" and not item["tree_truncated"] else 1 if item["tree_inspection_state"] == "inspected" else 2,
-            # Keep low-readiness repositories visible, while making the
-            # minimum evidence gate explicit in ordering.
-            {"ready": 0, "limited": 1, "low": 2}.get(item["evidence_readiness"], 3),
-            -(item["ranking_score"] if item["ranking_score"] is not None else -1),
+            -(item["ranking_score"] if item["ranking_score"] is not None else item["relevance_score"]),
             -item["relevance_score"],
+            0 if item["evidence_readiness"] == "ready" else 1,
+            0 if item["tree_inspection_state"] == "inspected" and not item["tree_truncated"] else 1 if item["tree_inspection_state"] == "inspected" else 2,
             -_safe_popularity(item.get("stargazers_count")),
             str(item.get("full_name") or item.get("name") or "").casefold(),
         ),

@@ -197,37 +197,59 @@ def test_github_search_uses_broad_candidates_and_ranks_with_tree_evidence(monkey
     assert results[0].full_name == "example/file-manager-pro"
     assert results[0].tree_inspection_state == "inspected"
     assert results[1].tree_inspection_state == "inspected"
-    assert results[0].ranking_score > results[1].ranking_score
+    assert results[0].ranking_score >= results[1].ranking_score
     assert results[0].analyzability_score > results[1].analyzability_score
 
 
-def test_high_relevance_low_readiness_does_not_beat_moderate_relevance_strong_source(monkeypatch):
+def test_low_readiness_candidate_does_not_beat_relevant_candidate_outside_cohort(monkeypatch):
     monkeypatch.setattr(repository_discovery, "score_relevance", lambda query, item: item["test_relevance"])
     candidates = [
         {"name": "topical-docs", "full_name": "a/topical-docs", "test_relevance": 98, "_repo_paths": ["README.md", "package.json"], "_tree_inspection_state": "inspected", "_readme_present": True},
         {"name": "working-library", "full_name": "b/working-library", "test_relevance": 70, "_repo_paths": ["pyproject.toml", "src/lib/core.py", "src/lib/io.py", "src/lib/model.py", "tests/test_core.py"], "_tree_inspection_state": "inspected"},
     ]
     ranked = rank_candidates("project", candidates)
-    assert ranked[0]["full_name"] == "b/working-library"
+    assert ranked[0]["full_name"] == "a/topical-docs"
     topical = next(item for item in ranked if item["full_name"] == "a/topical-docs")
     assert topical["relevance_score"] == 98
     assert topical["evidence_readiness"] == "low"
-    assert topical["analyzability_score"] < ranked[0]["analyzability_score"]
+    assert ranked[1]["analyzability_score"] > topical["analyzability_score"]
 
 
-def test_missing_tree_evidence_is_unknown_not_zero_and_ranks_after_inspected(monkeypatch):
+def test_missing_tree_evidence_is_unknown_and_keeps_relevance_order(monkeypatch):
     monkeypatch.setattr(repository_discovery, "score_relevance", lambda query, item: item["test_relevance"])
     candidates = [
         {"full_name": "a/not-inspected", "test_relevance": 100},
         {"full_name": "b/inspected", "test_relevance": 50, "_repo_paths": ["src/main.py", "pyproject.toml"], "_tree_inspection_state": "inspected"},
     ]
     ranked = rank_candidates("query", candidates)
-    assert ranked[0]["full_name"] == "b/inspected"
+    assert ranked[0]["full_name"] == "a/not-inspected"
     missing = next(item for item in ranked if item["full_name"] == "a/not-inspected")
     assert missing["analyzability_score"] is None
-    assert missing["ranking_score"] is None
+    assert missing["ranking_score"] == 100
     assert missing["tree_inspection_state"] == "not_inspected"
     assert missing["evidence_readiness"] == "unknown"
+
+
+def test_ready_repository_wins_within_comparable_relevance_cohort(monkeypatch):
+    monkeypatch.setattr(repository_discovery, "score_relevance", lambda query, item: item["test_relevance"])
+    candidates = [
+        {"full_name": "a/topical", "test_relevance": 100, "_repo_paths": ["README.md", "package.json"], "_tree_inspection_state": "inspected", "_readme_present": True},
+        {"full_name": "b/implementable", "test_relevance": 90, "_repo_paths": ["src/main.ts", "src/routes.ts", "package.json", "tests/app.test.ts"], "_tree_inspection_state": "inspected"},
+    ]
+    ranked = rank_candidates("query", candidates)
+    assert ranked[0]["full_name"] == "b/implementable"
+    assert ranked[0]["ranking_adjustment"] > 0
+    assert ranked[1]["evidence_readiness"] == "low"
+
+
+def test_ready_repository_does_not_override_relevance_outside_cohort(monkeypatch):
+    monkeypatch.setattr(repository_discovery, "score_relevance", lambda query, item: item["test_relevance"])
+    candidates = [
+        {"full_name": "a/topical", "test_relevance": 100, "_repo_paths": ["README.md", "package.json"], "_tree_inspection_state": "inspected", "_readme_present": True},
+        {"full_name": "b/implementable", "test_relevance": 80, "_repo_paths": ["src/main.ts", "src/routes.ts", "package.json", "tests/app.test.ts"], "_tree_inspection_state": "inspected"},
+    ]
+    ranked = rank_candidates("query", candidates)
+    assert ranked[0]["full_name"] == "a/topical"
 
 
 def test_tree_inspection_failure_is_distinct_from_an_empty_repository(monkeypatch):
