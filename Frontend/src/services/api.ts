@@ -381,6 +381,8 @@ export interface AnalyzeRepositoryResponse {
   analysis_status?: string;
   commit_sha?: string;
   repository_model?: Record<string, unknown>;
+  coverage_manifest?: Record<string, unknown>;
+  report_sections?: Record<string, unknown>;
   ai_insights?: string[];
   similar_repositories?: SimilarRepo[];
   message?: string;
@@ -635,6 +637,8 @@ export async function analyzeRepository(
       architecture: result.architecture, architecture_summary: result.architecture_summary, modules: result.modules,
       similar_repositories: result.similar_repositories, analysis_evidence: result.analysis_evidence ?? {},
       analysis_status: finalState, commit_sha: result.commit_sha, repository_model: result.repository_model,
+      coverage_manifest: result.coverage_manifest,
+      report_sections: result.report_sections,
       ai_insights: result.ai_insights ?? keyFeatures, languages: result.languages,
     };
   } catch (error) {

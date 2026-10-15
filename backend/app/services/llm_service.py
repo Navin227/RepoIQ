@@ -7,12 +7,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 
 from app.config import settings
-from app.services.repomix_service import RepomixContextService
 from app.services.repository_discovery import build_analysis_evidence
 from app.services.semantic_profile_builder import build_semantic_repository_profile
 from app.services.source_evidence_extractor import redact_secrets
 from app.services.repository_model import RepositoryRetrieval
 from app.services.analysis_diagnostics import emit
+from app.services.analysis_context import prepare_context
 
 logger = logging.getLogger(__name__)
 MAX_GEMINI_INPUT_TOKENS = 100_000
@@ -47,19 +47,32 @@ class LLMService:
         payload["analysis_id"] = analysis_id
         payload["analysis_run_id"] = analysis_id
 
+        context_bundle = None
+        context_error = None
+        if repo_path:
+            try:
+                context_bundle = prepare_context(
+                    metadata, scan, repo_path, str(metadata.get("commit_sha") or ""), payload
+                )
+                payload["context_bundle"] = context_bundle
+                payload["coverage_manifest"] = context_bundle["coverage_manifest"]
+            except Exception as exc:
+                context_error = exc
+
         emit(logger, "analysis_request_start", stage="llm_analysis", analysis_run_id=analysis_id,
              repository=metadata.get("full_name") or metadata.get("name") or "unknown",
              commit_sha=metadata.get("commit_sha"), readme_chars=len(str(readme or "")))
 
         try:
+            if context_error:
+                raise context_error
             self._log_gemini_input(
                 analysis_id,
                 self.provider,
                 json.dumps(payload, ensure_ascii=False, indent=2),
             )
             generated = None
-            retrieval = RepositoryRetrieval(repo_path) if repo_path else None
-            for round_number in range(3):
+            for round_number in range(1):
                 payload["investigation_round"] = round_number + 1
                 llm_started = time.perf_counter()
                 emit(logger, "llm_request_started", stage="llm_request", analysis_run_id=analysis_id,
@@ -123,55 +136,38 @@ class LLMService:
                          "investigation_requests": requests[:12]
                          if isinstance(requests, list) else [],
                      })
-                if not requests:
-                    if payload.get("investigation_coverage"):
-                        payload["investigation_coverage"] = {
-                            "rounds": round_number + 1,
-                            "unresolved": [],
-                            "additional_matches": len(payload.get("on_demand_source_matches", [])),
-                        }
-                    break
-                if not retrieval or round_number == 2:
-                    payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": len(payload.get("on_demand_source_matches", []))}
-                    break
-                retrieved = []
-                for request in requests[:12]:
-                    if not isinstance(request, dict):
-                        continue
-                    query = str(request.get("query") or "").strip()
-                    if query:
-                        previous_match_count = len(retrieved)
-                        emit(logger, "retrieval_query_started", stage="retrieval", analysis_run_id=analysis_id,
-                             repository=metadata.get("full_name") or metadata.get("name"), commit_sha=metadata.get("commit_sha"),
-                             round=round_number + 1, query=query)
-                        retrieved.extend(retrieval.search(query))
-                        emit(logger, "retrieval_query_completed", stage="retrieval", analysis_run_id=analysis_id,
-                             round=round_number + 1, query=query,
-                             match_count=len(retrieved) - previous_match_count,
-                             empty_result=len(retrieved) == previous_match_count)
-                if not retrieved:
-                    emit(logger, "retrieval_round_empty", level=logging.WARNING, stage="retrieval",
-                         analysis_run_id=analysis_id, round=round_number + 1, query_count=len(requests))
-                    payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": 0}
-                    break
-                for item in retrieved:
-                    item["commit_sha"] = str(metadata.get("commit_sha") or "")
-                payload.setdefault("on_demand_source_matches", []).extend(retrieved)
-                emit(logger, "retrieval_round_completed", stage="retrieval", analysis_run_id=analysis_id,
-                     round=round_number + 1, files_retrieved=len({item["path"] for item in retrieved}),
-                     range_count=len(retrieved), matches_total=len(payload["on_demand_source_matches"]))
-                payload["investigation_coverage"] = {"rounds": round_number + 1, "unresolved": requests, "additional_matches": len(payload["on_demand_source_matches"])}
+                coverage_unresolved = list(requests) if isinstance(requests, list) else []
+                if context_bundle:
+                    coverage_unresolved.extend(context_bundle["limitations"]["unresolved_files"])
+                    coverage_unresolved.extend(context_bundle["limitations"]["unresolved_questions"])
+                    coverage_unresolved.extend(context_bundle["limitations"]["conflicting_findings"])
+                payload["investigation_coverage"] = {
+                    "rounds": 1,
+                    "unresolved": coverage_unresolved,
+                    "additional_matches": 0,
+                }
+                break
             if generated is None:
                 raise ValueError("Gemini returned no analysis")
             analysis = self._normalize_analysis(generated, payload)
             analysis["analysis_evidence"] = payload["analysis_evidence"]
+            if context_bundle:
+                analysis["analysis_evidence"]["coverage_manifest"] = context_bundle["coverage_manifest"]
+                analysis["coverage_manifest"] = context_bundle["coverage_manifest"]
+                analysis["analysis_evidence"]["context_preparation"] = {
+                    "status": "complete" if not context_bundle["limitations"]["unresolved_files"] else "partial",
+                    "provider": settings.openrouter_model,
+                }
             if payload.get("on_demand_source_matches"):
                 analysis["analysis_evidence"]["on_demand_source_matches"] = payload["on_demand_source_matches"]
             analysis["ai_insights"] = []
             coverage = payload.get("investigation_coverage") or {}
             if coverage:
                 payload["analysis_evidence"]["investigation_coverage"] = coverage
-            analysis["analysis_status"] = "partial" if coverage.get("unresolved") else "ai_generated"
+            manifest = context_bundle.get("coverage_manifest", {}) if context_bundle else {}
+            analysis["analysis_status"] = "partial" if (
+                coverage.get("unresolved") or manifest.get("omitted_count") or manifest.get("unreadable_count")
+            ) else "ai_generated"
             emit(logger, "llm_analysis_completed", stage="llm_analysis", analysis_run_id=analysis_id,
                  duration_ms=round((time.perf_counter() - started) * 1000), status=analysis["analysis_status"],
                  claim_count=len(analysis.get("claims", [])), module_count=len(analysis.get("modules", [])))
@@ -215,111 +211,21 @@ class LLMService:
             raise RuntimeError("GEMINI_API_KEY is not configured")
 
         provider_payload = json.loads(json.dumps(payload))
+
+        def redact_payload(value: Any) -> Any:
+            if isinstance(value, str):
+                return redact_secrets(value)
+            if isinstance(value, list):
+                return [redact_payload(item) for item in value]
+            if isinstance(value, dict):
+                return {key: ("[REDACTED]" if re.search(r"api.?key|authorization|secret|password|credential", str(key), re.I) else redact_payload(item)) for key, item in value.items()}
+            return value
+
+        provider_payload = redact_payload(provider_payload)
         analysis_id = str(provider_payload.get("analysis_id") or uuid.uuid4().hex[:12])
         provider_payload["analysis_id"] = analysis_id
 
-        instructions = """
-You are a repository analysis engine. Return ONLY valid JSON, without Markdown
-or extra text.
-
-Use exactly these top-level fields:
-{
-  "overview": "Concise executive overview of the project and its purpose.",
-  "executive_overview": {
-    "what_is_this_project": ["Non-technical explanation of the project."],
-    "why_was_it_built": "The user problem supported by repository evidence.",
-    "user_features": [{
-      "name": "User action or capability",
-      "description": "What a user can do and the result.",
-      "evidence": ["Exact source file path or README.md"]
-    }],
-    "typical_use_cases": ["Evidence-supported use case."],
-    "who_is_this_for": ["Evidence-supported audience."],
-    "why_is_it_valuable": "Practical value supported by evidence.",
-    "one_line_summary": "One-sentence summary."
-  },
-  "claims": [{
-    "text": "One significant repository finding",
-    "subject": "stable subject for contradiction checks",
-    "category": "overview|feature|module|architecture|deployment|integration|data_flow",
-    "target_name": "matching feature/module name when applicable",
-    "confidence": 0.0,
-    "evidence": [{"path": "exact/repository/path", "start_line": 1, "end_line": 2, "excerpt": "Exact source text from these lines"}]
-  }],
-  "modules": [{
-    "name": "Functional capability",
-    "purpose": "Concise responsibility.",
-    "capabilities": ["Supported capability"],
-    "components": ["Exact repository file path or API route"],
-    "evidence": ["Exact observed evidence"],
-    "connected_modules": ["Related functional module"],
-    "confidence": 90
-  }],
-  "architecture": {
-    "architecture_summary": "Explain the architecture and evidence behind the inference.",
-    "architecture_type": "Supported architecture type or the unknown value",
-    "flow": ["User", "Frontend", "Backend"],
-    "request_lifecycle": ["Repository-specific request step"],
-    "components": [{
-      "name": "Component",
-      "responsibility": "Evidence-supported responsibility",
-      "input": "Supported input",
-      "output": "Supported output",
-      "communicates_with": ["Connected component"],
-      "connected_to": ["Connected component"]
-    }],
-    "communication": ["Supported communication method"],
-    "deployment": "Deployment evidence or the unknown value"
-  },
-  "investigation_requests": [{"query": "symbol or identifier to search", "question": "what remains unresolved"}]
-}
-
-Rules:
-- Treat analysis_evidence, source_evidence and semantic_repository_profile as
-  the authoritative inventory of repository facts.
-- Prefer actual source code, enriched API routes, service/controller/model
-  evidence, manifests/configuration and infrastructure files over README text
-  or filenames alone.
-- Do not invent features, modules, technologies, components or deployment
-  details. Use the supplied unknown value whenever evidence is insufficient.
-- Executive overview must be non-technical.
-- Read the README's project description, feature list, and usage instructions
-  before drafting the overview. Explain the actual product and concrete user
-  workflows; do not pad the overview with generic statements about repository
-  contents, folders, or application layers.
-- Never describe the repository itself as bringing files, documentation,
-  folders, or operational setup together into a product. Such statements are
-  filler and are not findings. Identify the named product/domain, concrete
-  user action, and observable result from repository evidence; if those are
-  not clear, return the supplied unknown value and an investigation request.
-- Every user_features item must describe a user-visible action or outcome,
-  not a technology, directory, package, or architectural layer. Include
-  evidence: exact implementation source paths or README.md that supports it.
-  Return no feature when the repository does not provide supporting evidence.
-- Typical use cases must explain how a user would use the product, based on
-  README instructions or observed application flows. Do not invent audiences
-  or workflows.
-- Modules must represent actual functional capabilities, not generic folders
-  or layers such as backend, frontend, services, controllers or utils.
-- Prefer distinct capabilities when supported by routes, source symbols and
-  implementation evidence. Return fewer modules when evidence is weak.
-- Return at most 6 modules. Each module must reference exact file paths or
-  API routes from the supplied inventory.
-- Do not accept a filename merely because its basename resembles a real file.
-- Explain architecture from observed routes, source, services, stack and
-  infrastructure evidence. Do not infer microservices merely from directories.
-- Keep Architecture & Flow focused on technical request processing rather
-  than repeating the executive overview.
-- Flow must be ordered. Component cards should describe actual responsibilities.
-- Communication and deployment must be supported by repository evidence.
-- Return a claim record for every significant summary, capability, module, architecture, deployment, integration, or data-flow statement. Cite exact source paths, exact line ranges, and exact excerpts. Do not cite a file without a relevant range. If evidence is missing, omit the claim and leave investigation_requests.
-- A verbatim excerpt is not sufficient by itself: the excerpt must directly
-  support the full meaning of its claim. Keep overview claims specific to this
-  repository and cite product documentation plus implementation evidence when
-  available. Do not generalize from filenames or directory names.
-- Keep the complete JSON concise. Return at most 6 user features and 16 claims. Keep each evidence excerpt under 240 characters. Do not repeat the same fact in multiple claims.
-- When required source evidence is missing, return up to 12 focused investigation_requests. Search exact symbols, identifiers, imports or configuration keys. Leave the list empty when findings are supported.
-"""
+        instructions = (Path(__file__).parent / "prompts" / "repo_analysis_system.txt").read_text(encoding="utf-8")
         prompt = (
             instructions
             + "\n\nRepository input:\n"
@@ -334,11 +240,7 @@ Rules:
         )
 
         errors = []
-        for model_name in (
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-        ):
+        for model_name in (settings.gemini_model,):
             request_started = time.perf_counter()
             provider_started = None
 
@@ -544,6 +446,9 @@ Rules:
             scan, stack, readme, code_signals
         )
         source_evidence = self._build_source_evidence_payload(scan)
+        if repo_path:
+            # The pinned, inventory-verified excerpts are carried only in context_bundle.
+            source_evidence["selected_source_file_details"] = []
         semantic_profile = build_semantic_repository_profile(
             metadata, readme, stack, scan, code_signals
         )
@@ -554,8 +459,7 @@ Rules:
             else []
         )
 
-        readme_text = str(readme or "")
-        repomix_context = self._collect_repomix_context(repo_path)
+        readme_text = redact_secrets(str(readme or ""))
         payload = {
             "analysis_id": str(metadata.get("analysis_id") or uuid.uuid4().hex[:12]),
             "metadata": {
@@ -595,7 +499,6 @@ Rules:
             "domain_signals": analysis_evidence.get("domain_signals", []),
             "functional_evidence": functional_evidence,
             "analysis_evidence": analysis_evidence,
-            "repomix_context": repomix_context,
         }
 
         stats = scan_evidence.get("stats", {}) if isinstance(scan_evidence, dict) else {}
@@ -609,14 +512,6 @@ Rules:
              semantic_profile_item_counts={key: len(value) if isinstance(value, (list, dict)) else 0
                                            for key, value in semantic_profile.items()})
         return payload
-
-    def _collect_repomix_context(self, repo_path: str | Path | None) -> Dict[str, Any]:
-        try:
-            return RepomixContextService().collect_context(repo_path) or {}
-        except Exception as exc:
-            emit(logger, "repomix_context_collection_failed", level=logging.WARNING, stage="repomix_context",
-                 exception_type=type(exc).__name__, reason=str(exc), fallback="repository_scan", exc_info=True)
-            return {}
 
     def _build_source_evidence_payload(self, scan: Dict[str, Any]) -> Dict[str, Any]:
         raw = scan.get("source_evidence") or {}
@@ -972,7 +867,27 @@ Rules:
             "modules": normalized_modules[:10],
             "architecture": normalized_architecture,
             "claims": self._normalize_claims(analysis.get("claims")),
+            "report_sections": self._normalize_report_sections(
+                analysis.get("report_sections")
+            ),
         }
+
+    @staticmethod
+    def _normalize_report_sections(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        sections: Dict[str, Any] = {}
+        technical = value.get("technical_analysis")
+        if isinstance(technical, str):
+            sections["technical_analysis"] = technical[:12_000]
+        for key in ("data_flow", "technology_stack_analysis", "repository_structure_analysis", "limitations"):
+            items = value.get(key)
+            if isinstance(items, list):
+                sections[key] = [item for item in items[:30] if isinstance(item, (str, dict))]
+        recommendations = value.get("recommendations")
+        if isinstance(recommendations, list):
+            sections["recommendations"] = [item for item in recommendations[:12] if isinstance(item, dict)]
+        return sections
 
     @staticmethod
     def _normalize_claims(value: Any) -> List[Dict[str, Any]]:

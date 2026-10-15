@@ -57,3 +57,5 @@ class AnalyzeResponse(BaseModel):
     analysis_evidence: Optional[Dict[str, Any]] = None
     analysis_status: Optional[AnalysisStatus] = None
     repository_model: Optional[Dict[str, Any]] = None
+    coverage_manifest: Optional[Dict[str, Any]] = None
+    report_sections: Optional[Dict[str, Any]] = None

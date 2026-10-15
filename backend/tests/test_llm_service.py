@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.llm_service import LLMService
-from app.services.repomix_service import RepomixContextService
 from app.services.similar_repo_service import SimilarRepoService
 
 
@@ -425,31 +424,3 @@ def test_duplicate_features_are_deduplicated_by_name():
         ]
     }, payload)
     assert [feature["name"] for feature in normalized["user_features"]] == ["Upload files"]
-
-
-def test_repomix_context_is_optional_and_secure(monkeypatch, tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    def fake_which(name):
-        return "npx" if name == "npx" else None
-
-    class DummyResult:
-        def __init__(self, returncode, stdout="", stderr=""):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def fake_run(command, capture_output, text, timeout, check):
-        output_file = Path(command[-1])
-        output_file.write_text("# Repomix\nThis repo contains a CLI app.", encoding="utf-8")
-        return DummyResult(0, stdout="Repomix summary")
-
-    monkeypatch.setattr("app.services.repomix_service.shutil.which", fake_which)
-    monkeypatch.setattr("app.services.repomix_service.subprocess.run", fake_run)
-
-    context = RepomixContextService().collect_context(repo)
-
-    assert context["source"] == "repomix"
-    assert "CLI app" in context["content"]
-    assert str(repo) not in context["path"]

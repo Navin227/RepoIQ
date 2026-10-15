@@ -52,6 +52,64 @@ def _as_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _filter_claims_by_coverage(claims: list, manifest: dict) -> list:
+    inspected = {
+        str(item.get("path"))
+        for item in _as_list(manifest.get("files"))
+        if isinstance(item, dict) and item.get("status") == "inspected"
+    }
+    filtered = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        item = dict(claim)
+        refs = _as_list(item.get("evidence"))
+        item["evidence"] = [
+            ref for ref in refs
+            if isinstance(ref, dict) and str(ref.get("path") or "") in inspected
+        ]
+        if refs and not item["evidence"]:
+            try:
+                item["confidence"] = min(float(item.get("confidence") or 0), 0.2)
+            except (TypeError, ValueError):
+                item["confidence"] = 0.0
+        filtered.append(item)
+    return filtered
+
+
+def _validate_report_recommendations(report: dict, retrieval: RepositoryRetrieval, manifest: dict) -> dict:
+    inspected = {
+        str(item.get("path"))
+        for item in _as_list(manifest.get("files"))
+        if isinstance(item, dict) and item.get("status") == "inspected"
+    }
+    validated = dict(report)
+    recommendations = []
+    for recommendation in _as_list(report.get("recommendations")):
+        if not isinstance(recommendation, dict):
+            continue
+        valid_refs = []
+        for reference in _as_list(recommendation.get("evidence")):
+            if not isinstance(reference, dict):
+                continue
+            path = str(reference.get("path") or "")
+            start = reference.get("start_line")
+            end = reference.get("end_line")
+            excerpt = str(reference.get("excerpt") or "")
+            if path not in inspected or not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+                continue
+            try:
+                source = retrieval.read(path, start, end)
+                if end <= source["end_line"] and excerpt and excerpt in source["content"]:
+                    valid_refs.append(reference)
+            except (OSError, ValueError):
+                continue
+        if valid_refs:
+            recommendations.append({**recommendation, "evidence": valid_refs})
+    validated["recommendations"] = recommendations
+    return validated
+
+
 def _claim_is_usable(claim: Any) -> bool:
     return (
         getattr(claim, "state", "unknown") in {"confirmed", "inferred"}
@@ -616,16 +674,32 @@ def _run_analysis(
         )
         ai_analysis["modules"] = _as_list(ai_analysis.get("modules"))
         ai_analysis["claims"] = _as_list(ai_analysis.get("claims"))
+        ai_analysis["report_sections"] = _as_dict(ai_analysis.get("report_sections"))
         ai_analysis["analysis_evidence"]["commit_sha"] = commit_sha
+
+        coverage_manifest = _as_dict(ai_analysis.get("coverage_manifest"))
+        if not coverage_manifest:
+            coverage_manifest = _as_dict(
+                ai_analysis["analysis_evidence"].get("coverage_manifest")
+            )
+        if coverage_manifest:
+            ai_analysis["claims"] = _filter_claims_by_coverage(
+                ai_analysis["claims"], coverage_manifest
+            )
 
         analysis_status = ai_analysis.get("analysis_status", "degraded")
         if analysis_status not in {"ai_generated", "partial", "degraded"}:
             analysis_status = "degraded"
 
         model_started = time.perf_counter()
+        source_retrieval = RepositoryRetrieval(repo_path)
+        if ai_analysis["report_sections"]:
+            ai_analysis["report_sections"] = _validate_report_recommendations(
+                ai_analysis["report_sections"], source_retrieval, coverage_manifest
+            )
         repository_model = build_repository_model(
             ai_analysis,
-            RepositoryRetrieval(repo_path),
+            source_retrieval,
             commit_sha,
         )
 
@@ -641,6 +715,25 @@ def _run_analysis(
                 if claim.state != "confirmed"
             ]
             unresolved.extend(repository_model.evidence_issues)
+            unresolved.extend(
+                str(item.get("description") or item.get("question") or item)
+                if isinstance(item, dict) else str(item)
+                for item in _as_list(ai_analysis["report_sections"].get("limitations"))
+            )
+            if coverage_manifest:
+                omitted = int(coverage_manifest.get("omitted_count") or 0)
+                unreadable = int(coverage_manifest.get("unreadable_count") or 0)
+                if omitted:
+                    unresolved.append(f"{omitted} repository files were omitted by size or context limits.")
+                if unreadable:
+                    unresolved.append(f"{unreadable} repository files could not be read.")
+                repository_model.coverage.update({
+                    "discovered_files": int(coverage_manifest.get("discovered_count") or 0),
+                    "inspected_files": int(coverage_manifest.get("inspected_count") or 0),
+                    "excluded_files": int(coverage_manifest.get("excluded_count") or 0),
+                    "omitted_files": omitted,
+                    "unreadable_files": unreadable,
+                })
             investigation_coverage = _as_dict(
                 ai_analysis["analysis_evidence"].get(
                     "investigation_coverage"
@@ -932,6 +1025,8 @@ def _run_analysis(
             result.architecture = ai_analysis.get("architecture")
             result.executive_overview = ai_analysis.get("executive_overview")
             result.analysis_evidence = ai_analysis.get("analysis_evidence")
+            if ai_analysis["report_sections"]:
+                result.analysis_evidence["report_sections"] = ai_analysis["report_sections"]
             result.analysis_status = analysis_status
             result.commit_sha = commit_sha
             result.repository_model = repository_model.model_dump(mode="json")
@@ -1000,6 +1095,8 @@ def _run_analysis(
             analysis_status=analysis_status,
             commit_sha=commit_sha,
             repository_model=repository_model.model_dump(mode="json"),
+            coverage_manifest=coverage_manifest or None,
+            report_sections=ai_analysis["report_sections"] or None,
             similar_repositories=similar_repositories,
         )
 

@@ -179,6 +179,8 @@ export interface AnalysisResult {
   analysis_status?: string;
   commit_sha?: string;
   repository_model?: Record<string, unknown>;
+  coverage_manifest?: Record<string, unknown>;
+  report_sections?: Record<string, unknown>;
   languages?: string[]; // Add languages
   error?: string;
   analysis_run_id?: string;
