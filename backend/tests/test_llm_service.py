@@ -88,8 +88,8 @@ def test_llm_service_parses_structured_gemini_json(monkeypatch):
     assert analysis["modules"][0]["purpose"] == "Handles user identity and protected access."
     assert analysis["modules"][0]["capabilities"] == ["Sign in users", "Protect private workflows", "Track current user"]
     assert analysis["modules"][0]["components"] == ["auth/context.tsx", "pages/Auth.tsx"]
-    assert analysis["modules"][0]["connected_modules"] == ["File Upload"]
-    assert analysis["modules"][0]["confidence"] == 92
+    assert analysis["modules"][0]["connected_modules"] == []
+    assert analysis["modules"][0]["confidence"] == 80
     assert analysis["architecture"]["flow"] == ["User", "Frontend", "API Layer", "Worker", "Storage"]
 
 
@@ -483,7 +483,61 @@ def test_gemma_bundle_and_source_excerpt_are_passed_to_the_single_gemini_call(mo
     assert "coverage_manifest" not in captured
     assert result["analysis_evidence"]["pipeline_diagnostics"]["gemma"]["status"] == "completed"
     assert result["analysis_evidence"]["pipeline_diagnostics"]["gemini"]["status"] == "completed"
+    assert result["analysis_evidence"]["context_preparation"]["status"] == "complete"
     assert result["analysis_status"] == "partial"
+
+
+def test_modules_exclude_artifacts_and_only_report_import_verified_connections():
+    service = LLMService()
+    files = [
+        {"path": "src/api.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/orders.py"]},
+        {"path": "src/orders.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": ["src/store.py"]},
+        {"path": "src/store.py", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationship_extraction": "python_ast_or_js_ts_imports", "relationships": []},
+        {"path": "package-lock.json", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+        {"path": "node_modules/lib/index.js", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+        {"path": "infra/api-gateway.tf", "status": "fully_inspected", "gemini_supplied_line_ranges": [{"start_line": 1, "end_line": 10}], "relationships": []},
+    ]
+    normalized = service._normalize_analysis({
+        "overview": "An order API with persistence.",
+        "modules": [
+            {"name": "Order API", "purpose": "Receives and validates order requests.", "capabilities": ["Manage project data", "Validates order requests"], "components": ["src/api.py", "package-lock.json", "node_modules/lib/index.js", "infra/api-gateway.tf"], "connected_modules": ["Order Store"], "confidence": 99},
+            {"name": "Order Service", "purpose": "Applies order business rules.", "components": ["src/orders.py"], "confidence": 90},
+            {"name": "Order Store", "purpose": "Persists order records.", "components": ["src/store.py"], "confidence": 90},
+            {"name": "Infrastructure", "purpose": "Configures API gateway deployment.", "components": ["infra/api-gateway.tf"], "confidence": 90},
+        ], "architecture": {},
+    }, {"context_bundle": {"coverage_manifest": {"files": files}}})
+
+    modules = {item["name"]: item for item in normalized["modules"]}
+    assert modules["Order API"]["components"] == ["src/api.py"]
+    assert modules["Order API"]["capabilities"] == ["Validates order requests"]
+    assert modules["Order API"]["connected_modules"] == ["Order Service"]
+    assert modules["Order API"]["confidence"] == 65
+    assert modules["Order Service"]["connected_modules"] == ["Order Store"]
+    assert modules["Order Service"]["confidence"] == 65
+    assert modules["Order Store"]["connection_evidence_status"] == "verified_none"
+    assert modules["Infrastructure"]["connection_evidence_status"] == "not_fully_assessed"
+    assert "Infrastructure" not in modules["Order API"]["connected_modules"]
+
+
+def test_end_user_use_cases_are_titled_evidence_backed_and_deduplicated():
+    service = LLMService()
+    payload = {
+        "source_evidence": {"selected_source_file_details": [{"path": "src/pdf.py", "role": "service"}]},
+        "analysis_evidence": {}, "file_tree": ["src/pdf.py"], "top_level_modules": [],
+    }
+    normalized = service._normalize_executive_overview({
+        "end_user_use_cases": [
+            {"title": "Prepare a PDF for sharing", "description": "Compress a PDF to reduce its file size before sharing.", "evidence": ["src/pdf.py"]},
+            {"title": "Prepare a PDF for sharing", "description": "Compress a PDF to reduce its file size before sharing.", "evidence": ["src/pdf.py"]},
+            {"title": "Manage project data", "description": "Compress the file to reduce its size before sharing.", "evidence": ["src/pdf.py"]},
+            {"title": "Convert files", "description": "Convert supported files between formats.", "evidence": ["README.md"]},
+        ],
+    }, payload)
+    assert normalized["end_user_use_cases"] == [{
+        "title": "Prepare a PDF for sharing",
+        "description": "Compress a PDF to reduce its file size before sharing.",
+        "evidence": ["src/pdf.py"],
+    }]
 
 
 def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():

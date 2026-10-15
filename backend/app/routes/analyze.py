@@ -917,6 +917,7 @@ def _run_analysis(
                 executive["why_is_it_valuable"] = UNKNOWN_EVIDENCE_MESSAGE
                 executive["one_line_summary"] = UNKNOWN_EVIDENCE_MESSAGE
                 executive["typical_use_cases"] = []
+                executive["end_user_use_cases"] = []
                 executive["who_is_this_for"] = []
             else:
                 ai_analysis["overview"] = _filter_narrative_sentences(
@@ -936,6 +937,16 @@ def _run_analysis(
                         retained for item in _as_list(executive.get(field))
                         if (retained := _filter_narrative_sentences(item, valid_overview_claims))
                     ]
+                executive["end_user_use_cases"] = [
+                    {
+                        **item,
+                        "description": retained,
+                    }
+                    for item in _as_list(executive.get("end_user_use_cases"))
+                    if isinstance(item, dict)
+                    and str(item.get("title") or "").strip()
+                    and (retained := _filter_narrative_sentences(item.get("description"), valid_overview_claims))
+                ]
 
             ai_analysis["architecture"] = _run_output_filter(_filter_architecture,
                 ai_analysis.get("architecture"),

@@ -233,8 +233,8 @@ def test_missing_tree_evidence_is_unknown_and_keeps_relevance_order(monkeypatch)
 def test_ready_repository_wins_within_comparable_relevance_cohort(monkeypatch):
     monkeypatch.setattr(repository_discovery, "score_relevance", lambda query, item: item["test_relevance"])
     candidates = [
-        {"full_name": "a/topical", "test_relevance": 100, "_repo_paths": ["README.md", "package.json"], "_tree_inspection_state": "inspected", "_readme_present": True},
-        {"full_name": "b/implementable", "test_relevance": 90, "_repo_paths": ["src/main.ts", "src/routes.ts", "package.json", "tests/app.test.ts"], "_tree_inspection_state": "inspected"},
+        {"full_name": "a/topical", "test_relevance": 100, "stargazers_count": 1_000_000, "_repo_paths": ["README.md", "package.json"], "_tree_inspection_state": "inspected", "_readme_present": True},
+        {"full_name": "b/implementable", "test_relevance": 90, "stargazers_count": 0, "_repo_paths": ["src/main.ts", "src/routes.ts", "package.json", "tests/app.test.ts"], "_tree_inspection_state": "inspected"},
     ]
     ranked = rank_candidates("query", candidates)
     assert ranked[0]["full_name"] == "b/implementable"

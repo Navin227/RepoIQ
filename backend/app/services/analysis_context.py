@@ -378,7 +378,7 @@ def prepare_context(metadata: dict[str, Any], scan: dict[str, Any], repo_path: s
         evidence = [{"path": item["path"], "roles": item["roles"], "imports": item["relationships"], "important_to_execution_path": item["important_to_execution_path"], "ranges": [{k: e[k] for k in ("start_line", "end_line", "content")} for e in excerpts if e["path"] == item["path"]]} for item in batch]
         prompt = "Analyze only supplied code and exact source ranges. Return JSON keys purpose, subsystems, entry_points, modules, relationships, integrations, data_flows, important_dependencies, uncertainties, conflicts, evidence_paths, evidence_references. Every finding must include exact evidence path and line ranges or a supporting excerpt. Never cite a path or line outside supplied ranges.\n" + json.dumps({"repository": metadata.get("full_name") or metadata.get("name"), "commit_sha": commit_sha, "batch": index + 1, "total_batches": len(batches), "files": evidence}, ensure_ascii=False)
         try:
-            raw = _chat(key, settings.openrouter_model, [{"role": "system", "content": "You prepare source-grounded repository context for a second analysis model. Return valid JSON only; do not invent paths. Preserve subsystem details and exact evidence references."}, {"role": "user", "content": prompt}])
+            raw = _chat(key, settings.openrouter_model, [{"role": "system", "content": "You prepare concise, source-grounded repository context for a second analysis model. Return valid JSON only. Use the supplied file paths, exact line ranges, detected roles, imports, symbols, routes and configuration as evidence. Identify real module boundaries and only direct relationships supported by imports or explicit interactions. Exclude generated, vendored and dependency files from functional findings. Keep uncertainty explicit, preserve exact evidence references, and prefer fewer accurate findings over generic summaries. Never invent paths, line ranges, capabilities or architecture edges."}, {"role": "user", "content": prompt}])
         except Exception as exc:
             for item in batch:
                 item.update(status="inspection_failed", reason=f"gemma_request_failed:{type(exc).__name__}", gemma_processed=False)
@@ -434,13 +434,24 @@ def prepare_context(metadata: dict[str, Any], scan: dict[str, Any], repo_path: s
     manifest["omitted_count"] = sum(e["status"] == "omitted" for e in records)
     manifest["excluded_count"] = sum(e["status"] == "excluded" for e in records)
     manifest["unreadable_count"] = sum(e["status"] == "unreadable" for e in records)
-    important_entries = [e for e in records if "entry_point" in e["roles"] and e["file_type"] in SOURCE_SUFFIXES]
+    source_entries = [e for e in records if e["file_type"] in SOURCE_SUFFIXES and "test" not in e.get("roles", [])]
+    important_entries = [e for e in source_entries if "entry_point" in e["roles"]]
     inspected_entries = [e for e in important_entries if e["status"] == "fully_inspected"]
     fully_inspected_paths = {e["path"] for e in records if e["status"] == "fully_inspected"}
     critical = [e for e in records if e["important_to_execution_path"] and e["file_type"] in SOURCE_SUFFIXES and e["path"] not in fully_inspected_paths]
-    core_covered = bool(important_entries or not any(e["file_type"] in SOURCE_SUFFIXES for e in records)) and len(inspected_entries) == len(important_entries) and not critical
+    if important_entries:
+        core_covered = len(inspected_entries) == len(important_entries) and not critical
+    elif source_entries:
+        # Libraries and non-executable repositories often have no `main`
+        # entrypoint. Require direct inspection of at least one implementation
+        # file instead of declaring every such repository incomplete.
+        role_paths = [e for e in source_entries if set(e.get("roles", [])) & {"route", "business_logic", "data_access", "integration"}]
+        analysis_roots = role_paths or source_entries
+        core_covered = any(e["status"] == "fully_inspected" for e in analysis_roots)
+    else:
+        core_covered = True
     manifest["unresolved_count"] = sum(e["status"] in {"omitted", "unreadable", "inspection_failed"} for e in records)
-    manifest["coverage"] = {"total_discovered_files": manifest["discovered_count"], "eligible_source_files": manifest["eligible_source_count"], "fully_inspected_files": manifest["fully_inspected_count"], "partially_inspected_files": manifest["partially_inspected_count"], "omitted_files": manifest["omitted_count"], "excluded_files": manifest["excluded_count"], "unreadable_files": manifest["unreadable_count"], "inspection_failed_files": manifest["inspection_failed_count"], "important_entry_points": len(important_entries), "important_entry_points_fully_inspected": len(inspected_entries), "known_critical_dependencies_not_inspected": [e["path"] for e in critical], "core_execution_paths_sufficiently_covered": core_covered, "status": "sufficient" if core_covered else "partial", "reason": "all discovered entry points and traced critical dependencies were inspected" if core_covered else "one or more entry points or traced execution-path dependencies lack complete Gemma evidence"}
+    manifest["coverage"] = {"total_discovered_files": manifest["discovered_count"], "eligible_source_files": manifest["eligible_source_count"], "fully_inspected_files": manifest["fully_inspected_count"], "partially_inspected_files": manifest["partially_inspected_count"], "omitted_files": manifest["omitted_count"], "excluded_files": manifest["excluded_count"], "unreadable_files": manifest["unreadable_count"], "inspection_failed_files": manifest["inspection_failed_count"], "important_entry_points": len(important_entries), "important_entry_points_fully_inspected": len(inspected_entries), "known_critical_dependencies_not_inspected": [e["path"] for e in critical], "core_execution_paths_sufficiently_covered": core_covered, "status": "sufficient" if core_covered else "partial", "reason": "all discovered entry points and traced critical dependencies were inspected" if important_entries and core_covered else "at least one implementation file was inspected in a repository without a detected executable entry point" if core_covered and source_entries else "one or more entry points or traced execution-path dependencies lack complete Gemma evidence"}
     unresolved = [e["path"] for e in records if e["status"] in {"omitted", "unreadable", "inspection_failed"}]
     bundle = {"repository": metadata.get("full_name") or metadata.get("name"), "commit_sha": commit_sha, "coverage_manifest": manifest, "coverage_gate": manifest["coverage"], "repository_map": merged, "source_excerpts": excerpts, "batches_processed": len(findings), "limitations": {"unresolved_files": unresolved, "unresolved_questions": merged["uncertainties"], "conflicting_findings": merged["conflicts"], "unsupported_evidence_paths": merged["unsupported_evidence_paths"], "truncated_finding_categories": merged["truncated_categories"], "provider": settings.openrouter_model, "unsupported_relationship_extraction": manifest["unsupported_relationship_extraction"]}}
     return bundle

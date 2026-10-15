@@ -297,7 +297,10 @@ class LLMService:
                 analysis["analysis_evidence"]["coverage_manifest"] = final_manifest
                 analysis["coverage_manifest"] = final_manifest
                 analysis["analysis_evidence"]["context_preparation"] = {
-                    "status": "complete" if effective_gate.get("status") == "sufficient" and not context_bundle["limitations"]["unresolved_files"] and not final_manifest.get("partially_inspected_count") else "partial",
+                    # Optional files outside selected execution paths remain
+                    # visible in the manifest, but do not downgrade otherwise
+                    # sufficient context preparation.
+                    "status": "complete" if effective_gate.get("core_execution_paths_sufficiently_covered") is True or ("core_execution_paths_sufficiently_covered" not in effective_gate and effective_gate.get("status") == "sufficient") else "partial",
                     "coverage_gate": effective_gate,
                     "provider": settings.openrouter_model,
                 }
@@ -915,22 +918,6 @@ class LLMService:
             if normalized
         }
 
-        known_routes = {
-            normalized.casefold()
-            for normalized in (
-                self._normalize_evidence_path(route, route=True)
-                for route in payload.get("api_routes", [])
-            )
-            if normalized
-        }
-        for item in payload.get("api_routes_enriched") or []:
-            if isinstance(item, dict) and item.get("path"):
-                normalized = self._normalize_evidence_path(
-                    item["path"], route=True
-                )
-                if normalized:
-                    known_routes.add(normalized.casefold())
-
         normalized_modules = []
         seen_module_names = set()
 
@@ -945,12 +932,9 @@ class LLMService:
                 or item.get("summary")
                 or ""
             ).strip()
-            model_confidence = self._coerce_confidence(item.get("confidence", 80))
+            model_confidence = self._coerce_confidence(item.get("confidence", 50))
 
-            if (
-                not name
-                or not purpose
-            ):
+            if not name or not purpose or self._is_generic_analysis_text(purpose):
                 continue
 
             module_key = re.sub(r"\s+", " ", name).casefold()
@@ -965,22 +949,27 @@ class LLMService:
 
             for component in raw_components:
                 normalized_path = self._normalize_evidence_path(component)
-                normalized_route = self._normalize_evidence_path(
-                    component, route=True
-                )
 
-                # Only exact known file paths and exact known API routes count.
-                # Basename matches and README substring matches are deliberately
-                # excluded because they can validate unrelated repository evidence.
-                if (
-                    normalized_path.casefold() in known_paths
-                    or normalized_route.casefold() in known_routes
-                ):
+                # Only exact inspected repository files count. Route strings,
+                # basenames, and README substring matches cannot identify the
+                # implementation file for a module.
+                if normalized_path.casefold() in known_paths and self._is_functional_module_path(normalized_path, name):
                     supported_components.append(component.strip())
 
             supported_components = list(dict.fromkeys(supported_components))
             if not supported_components:
                 continue
+
+            capabilities = [
+                capability for capability in self._normalize_string_list(item.get("capabilities"))
+                if not self._is_generic_analysis_text(capability)
+            ][:8]
+            # Model confidence is retained for diagnostics but capped by the
+            # amount of distinct, directly mapped implementation evidence.
+            # These evidence-count ceilings are conservative heuristics, not
+            # calibrated probabilities.
+            evidence_ceiling = min(95, 50 + 15 * len(supported_components))
+            confidence = min(model_confidence, evidence_ceiling)
 
             seen_module_names.add(module_key)
             evidence_items = self._normalize_string_list(item.get("evidence"))[:8]
@@ -995,18 +984,60 @@ class LLMService:
                     "name": name,
                     "purpose": purpose,
                     "description": purpose,
-                    "capabilities": self._normalize_string_list(
-                        item.get("capabilities")
-                    )[:8],
+                    "capabilities": capabilities,
                     "components": supported_components,
                     "evidence": supported_evidence or supported_components,
-                    "connected_modules": self._normalize_string_list(
-                        item.get("connected_modules")
-                    )[:8],
-                    "confidence": model_confidence,
+                    # Connections are filled below from deterministic local
+                    # import edges. Model-suggested edges alone are not proof.
+                    "connected_modules": [],
+                    "confidence": confidence,
                     "model_confidence": model_confidence,
                 }
             )
+
+        manifest = (payload.get("context_bundle") or {}).get("coverage_manifest") or {}
+        manifest_files = manifest.get("files", []) if isinstance(manifest, dict) else []
+        path_to_modules: dict[str, set[str]] = {}
+        for module in normalized_modules:
+            for component in module["components"]:
+                path = self._normalize_evidence_path(component)
+                if path:
+                    path_to_modules.setdefault(path.casefold(), set()).add(module["name"])
+        # The deterministic inventory resolves Python and JS/TS imports. Keep
+        # only directed edges crossing the validated file sets of two modules.
+        for entry in manifest_files if isinstance(manifest_files, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("relationship_extraction") != "python_ast_or_js_ts_imports":
+                continue
+            source_path = self._normalize_evidence_path(entry.get("path"))
+            for target in entry.get("relationships", []) if isinstance(entry.get("relationships"), list) else []:
+                target_path = self._normalize_evidence_path(target)
+                for source_name in path_to_modules.get(source_path.casefold(), set()):
+                    for target_name in path_to_modules.get(target_path.casefold(), set()):
+                        if source_name != target_name:
+                            source_module = next((m for m in normalized_modules if m["name"] == source_name), None)
+                            if source_module and target_name not in source_module["connected_modules"]:
+                                source_module["connected_modules"].append(target_name)
+        supported_relationship_suffixes = {".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
+        for module in normalized_modules:
+            if module["connected_modules"]:
+                module["connection_evidence_status"] = "verified"
+            else:
+                suffixes = {PurePosixPath(path).suffix.casefold() for path in module["components"]}
+                component_entries = {
+                    self._normalize_evidence_path(entry.get("path")).casefold(): entry
+                    for entry in manifest_files if isinstance(entry, dict) and entry.get("path")
+                } if isinstance(manifest_files, list) else {}
+                relationships_inspected = all(
+                    isinstance(component_entries.get(self._normalize_evidence_path(path).casefold(), {}).get("relationships"), list)
+                    and component_entries.get(self._normalize_evidence_path(path).casefold(), {}).get("relationship_extraction") == "python_ast_or_js_ts_imports"
+                    for path in module["components"]
+                )
+                module["connection_evidence_status"] = (
+                    "verified_none" if suffixes and suffixes <= supported_relationship_suffixes and relationships_inspected
+                    else "not_fully_assessed"
+                )
 
         # Invalid module candidates should not invalidate otherwise valid
         # overview and architecture sections. An empty module list is valid.
@@ -1194,7 +1225,55 @@ class LLMService:
         try:
             return max(0, min(100, int(float(value))))
         except (TypeError, ValueError):
-            return 80
+            return 50
+
+    @staticmethod
+    def _is_functional_module_path(path: str, module_name: str) -> bool:
+        """Exclude generated/dependency artifacts and keep infra config in infra modules."""
+        normalized = path.replace("\\", "/").casefold()
+        parts = PurePosixPath(normalized).parts
+        ignored = {
+            "node_modules", "vendor", "dist", "build", "coverage", ".next",
+            ".nuxt", ".venv", "venv", "site-packages", "target",
+            "bower_components", "generated", "gen", "__generated__",
+            "third_party", "third-party", "fixtures", "__fixtures__",
+        }
+        if any(part in ignored for part in parts[:-1]):
+            return False
+        name = parts[-1] if parts else ""
+        if name in {
+            "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock",
+            "uv.lock", "cargo.lock", "go.sum", "composer.lock", "gemfile.lock",
+            "podfile.lock", "gradle.lockfile", "npm-shrinkwrap.json",
+        } or name.endswith((".lock", ".min.js", ".min.css", ".map", ".generated.ts", ".pb.go")):
+            return False
+        if re.search(r"(^|/)(test|tests|__tests__|spec|docs?)(/|$)|(^|/)(test_|.*\.(test|spec)\.)", normalized):
+            return False
+        suffix = PurePosixPath(normalized).suffix
+        source_suffixes = {
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+            ".kt", ".rb", ".php", ".cs", ".cpp", ".h", ".sql", ".vue",
+            ".svelte", ".swift", ".scala", ".ex", ".exs", ".dart", ".c",
+            ".cc", ".hpp", ".sh",
+        }
+        if suffix in source_suffixes:
+            return True
+        infrastructure_module = bool(re.search(r"infra|deploy|terraform|cloud|gateway|operations", module_name, re.I))
+        return infrastructure_module and (
+            suffix in {".tf", ".tfvars", ".yaml", ".yml", ".json"}
+            or name in {"dockerfile", "makefile", "serverless.yml", "serverless.yaml"}
+            or normalized.startswith((".github/workflows/", "k8s/", "kubernetes/", "helm/"))
+        )
+
+    @staticmethod
+    def _is_generic_analysis_text(value: str) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "").strip().casefold()).rstrip(" .!")
+        return text in {
+            "manage project data", "support user workflows", "provide a major project responsibility",
+            "manage data", "improve productivity", "support the user workflow",
+            "handles project functionality", "provides project functionality",
+            "performs core tasks", "supports core functionality",
+        } or text in {UNKNOWN.casefold(), "unknown", "n/a"}
 
     @staticmethod
     def _is_generic_module_name(name: str) -> bool:
@@ -1225,7 +1304,7 @@ class LLMService:
         if not isinstance(data, dict):
             return {
                 "what_is_this_project": [], "why_was_it_built": UNKNOWN,
-                "user_features": [], "typical_use_cases": [], "who_is_this_for": [],
+                "user_features": [], "typical_use_cases": [], "end_user_use_cases": [], "who_is_this_for": [],
                 "why_is_it_valuable": UNKNOWN, "one_line_summary": UNKNOWN,
             }
 
@@ -1281,6 +1360,55 @@ class LLMService:
         use_cases = data.get("typical_use_cases", [])
         if isinstance(use_cases, str):
             use_cases = [use_cases]
+        raw_end_user_cases = data.get("end_user_use_cases", use_cases)
+        if isinstance(raw_end_user_cases, (str, dict)):
+            raw_end_user_cases = [raw_end_user_cases]
+        end_user_cases = []
+        legacy_use_cases = [
+            str(item).strip() for item in use_cases
+            if isinstance(item, str) and str(item).strip()
+            and not self._is_generic_analysis_text(str(item))
+        ] if isinstance(use_cases, list) else []
+        seen_use_cases: set[str] = set()
+        seen_use_case_titles: set[str] = set()
+        if isinstance(raw_end_user_cases, list):
+            for item in raw_end_user_cases:
+                if isinstance(item, dict):
+                    title = str(item.get("title") or "").strip()
+                    description = str(item.get("description") or "").strip()
+                    raw_case_evidence = item.get("evidence", [])
+                    if isinstance(raw_case_evidence, str):
+                        raw_case_evidence = [raw_case_evidence]
+                    supported_case_evidence = [
+                        str(reference).strip()
+                        for reference in raw_case_evidence if isinstance(reference, str)
+                        and (
+                            self._normalize_evidence_path(reference).casefold() in feature_paths
+                            or self._normalize_evidence_path(reference, route=True).casefold() in feature_paths
+                        )
+                    ] if isinstance(raw_case_evidence, list) else []
+                else:
+                    title = ""
+                    description = str(item or "").strip()
+                    supported_case_evidence = []
+                normalized_description = re.sub(r"\s+", " ", description).casefold()
+                normalized_title = re.sub(r"\s+", " ", title).casefold()
+                if (
+                    not description
+                    or self._is_generic_analysis_text(description)
+                    or (title and self._is_generic_analysis_text(title))
+                    or normalized_description in seen_use_cases
+                    or (normalized_title and normalized_title in seen_use_case_titles)
+                    or (title and not supported_case_evidence)
+                ):
+                    continue
+                seen_use_cases.add(normalized_description)
+                if normalized_title:
+                    seen_use_case_titles.add(normalized_title)
+                if normalized_description not in {item.casefold() for item in legacy_use_cases}:
+                    legacy_use_cases.append(description)
+                if title:
+                    end_user_cases.append({"title": title, "description": description, "evidence": list(dict.fromkeys(supported_case_evidence))[:4]})
         audiences = data.get("who_is_this_for", [])
         if isinstance(audiences, str):
             audiences = [audiences]
@@ -1297,9 +1425,9 @@ class LLMService:
             "user_features": features[:8],
             "typical_use_cases": [
                 str(item).strip()
-                for item in use_cases
-                if str(item).strip()
-            ][:6] if isinstance(use_cases, list) else [],
+                for item in legacy_use_cases
+            ][:6],
+            "end_user_use_cases": end_user_cases[:6],
             "who_is_this_for": [
                 str(item).strip()
                 for item in audiences

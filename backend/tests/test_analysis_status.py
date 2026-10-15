@@ -16,7 +16,11 @@ def test_complete_result_does_not_require_optional_fields_or_every_claim():
         {"text": "Rejected", "state": "rejected", "evidence": []},
     ]
     result["analysis_evidence"] = {"coverage_manifest": {"omitted_count": 20}}
-    classification = classify_analysis_status(result, coverage_gate={"status": "sufficient", "core_execution_paths_sufficiently_covered": True})
+    classification = classify_analysis_status(
+        result,
+        pipeline={"context_preparation": {"status": "partial"}, "gemini_output": {"status": "partial"}},
+        coverage_gate={"status": "sufficient", "core_execution_paths_sufficiently_covered": True},
+    )
     assert classification["status"] == "complete"
     assert classification["required_sections"]["overview"] == "present"
     assert classification["optional_sections"]["executive_overview"] == "optional"

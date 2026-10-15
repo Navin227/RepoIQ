@@ -305,7 +305,10 @@ Include meaningful user-visible or consumer-facing capabilities supported by imp
 Explain actual behavior, relevant inputs or outputs, and important constraints. Do not list dependencies or internal functions as user features unless they enable a demonstrable capability.
 
 `typical_use_cases`:
-Describe realistic scenarios enabled by verified functionality. Do not claim a use case is supported if its essential execution path is missing or unverified.
+Keep this existing field as a string array for API compatibility. Describe realistic scenarios enabled by verified functionality. Do not claim a use case is supported if its essential execution path is missing or unverified. When a use case is supported, the matching title and explanation may also appear in `end_user_use_cases`.
+
+`end_user_use_cases`:
+Return approximately 3–6 repository-specific end-user workflows when evidence supports them, and fewer when it does not. Each item must contain `title`, `description`, and `evidence` (repository-relative implementation paths). Explain the user's goal, the action supported by the code, and the outcome in 1–3 concise sentences. Build on the executive overview by combining capabilities only when the code demonstrates that they work together. Do not repeat the overview, enumerate endpoints, turn internal infrastructure into a user benefit, or invent login, payments, uploads, exports, or other behavior. Omit generic filler rather than padding the list. Every cited path must be an inspected implementation path supplied in the context.
 
 `who_is_this_for`:
 Identify likely users or consumers based on the interfaces and functionality. Label inferred audiences appropriately.
@@ -357,7 +360,11 @@ Explain actual responsibility, relevant files, important interfaces, and verifie
 
 `components` should identify real implementation elements, not invented architectural abstractions.
 
+Map each module only to source files that implement it or configuration files that configure that module. Exclude lockfiles, vendored/dependency trees, generated files, build outputs, and tests from functional component lists. Keep infrastructure files in infrastructure/deployment modules; do not assign API gateway Terraform to application business logic. Use concise, repository-specific purposes and capabilities, and omit generic filler. Confidence must reflect both your assessment and the amount of direct evidence; do not apply one default confidence to every module.
+
 `connected_modules` should identify other modules in the report and describe the evidenced relationship where the expected schema permits. If the existing schema requires a simpler representation, follow that schema without breaking compatibility.
+
+Report a connection only when supplied local import/call/API/queue/database/configuration evidence establishes the edge. Do not infer connections from names or module proximity. Leave the list empty when no relationship is verified; an empty list means no verified edge was found in the inspected evidence, not proof that the module is architecturally isolated.
 
 Do not force six modules if fewer can be established.
 
@@ -508,6 +515,9 @@ Return one valid JSON object containing exactly these top-level fields:
       }
     ],
     "typical_use_cases": [],
+    "end_user_use_cases": [
+      {"title": "string", "description": "string", "evidence": ["repository/relative/path"]}
+    ],
     "who_is_this_for": "string",
     "why_is_it_valuable": "string",
     "one_line_summary": "string"

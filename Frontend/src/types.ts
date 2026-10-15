@@ -113,6 +113,11 @@ export interface ExecutiveOverview {
     evidence?: string[];
   }>;
   typical_use_cases: string[];
+  end_user_use_cases?: Array<{
+    title: string;
+    description: string;
+    evidence?: string[];
+  }>;
   who_is_this_for: string[];
   why_is_it_valuable: string;
   one_line_summary: string;
@@ -125,6 +130,7 @@ export interface BusinessModule {
   capabilities: string[];
   components: string[];
   connected_modules: string[];
+  connection_evidence_status?: 'verified' | 'verified_none' | 'not_fully_assessed';
   confidence?: number;
   evidence?: string[];
 }

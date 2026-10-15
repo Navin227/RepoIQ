@@ -69,6 +69,20 @@ def test_context_batches_are_bounded_and_manifest_marks_omissions(monkeypatch, t
     assert bundle["source_excerpts"][0]["path"] == "main.py"
     assert bundle["limitations"]["unresolved_questions"]
     assert bundle["limitations"]["conflicting_findings"]
+    assert bundle["coverage_gate"]["status"] == "sufficient"
+
+
+def test_library_without_executable_entrypoint_can_have_sufficient_core_coverage(monkeypatch, tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "package.py").write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
+    monkeypatch.setattr(context.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(context, "_chat", lambda *args: json.dumps({"purpose": "string normalization library", "evidence_paths": ["src/package.py"]}))
+
+    bundle = context.prepare_context({}, {}, tmp_path, "abc", {})
+
+    assert bundle["coverage_gate"]["important_entry_points"] == 0
+    assert bundle["coverage_gate"]["core_execution_paths_sufficiently_covered"] is True
+    assert bundle["coverage_gate"]["status"] == "sufficient"
 
 
 def test_gemma_malformed_json_fails_closed(monkeypatch, tmp_path):

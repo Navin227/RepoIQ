@@ -394,6 +394,17 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
     typical_use_cases: getStringList(rawExecutiveOverview?.typical_use_cases)
       .map(cleanNarrative)
       .filter((item) => item && item !== UNKNOWN_EVIDENCE),
+    end_user_use_cases: Array.isArray(rawExecutiveOverview?.end_user_use_cases)
+      ? rawExecutiveOverview.end_user_use_cases
+          .filter((item): item is { title: string; description: string; evidence?: string[] } =>
+            Boolean(item) && typeof item.title === 'string' && typeof item.description === 'string')
+          .map((item) => ({
+            title: cleanNarrative(item.title),
+            description: cleanNarrative(item.description),
+            evidence: getStringList(item.evidence),
+          }))
+          .filter((item) => item.title && item.description && item.description !== UNKNOWN_EVIDENCE)
+      : [],
     who_is_this_for: getStringList(rawExecutiveOverview?.who_is_this_for)
       .map(cleanNarrative)
       .filter((item) => item && item !== UNKNOWN_EVIDENCE),
@@ -402,6 +413,9 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
       ? cleanNarrative(getEvidenceText(rawExecutiveOverview?.one_line_summary))
       : overviewSummary,
   };
+  const endUserUseCases = executiveOverview.end_user_use_cases?.length
+    ? executiveOverview.end_user_use_cases
+    : executiveOverview.typical_use_cases.map((description) => ({ title: '', description, evidence: [] as string[] }));
   const businessModules = (Array.isArray(repo.analysis?.businessModules) ? repo.analysis.businessModules : [])
     .filter((module): module is BusinessModule =>
       Boolean(module) && typeof module.name === 'string' && module.name.trim().length > 0
@@ -630,22 +644,20 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
           </div>
 
           <div>
-            <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">What can Users do?</h4>
+            <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">End User Use Cases</h4>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {executiveOverview.user_features.length > 0 ? executiveOverview.user_features.slice(0, 8).map((feature, idx) => (
-                <div key={`${feature.name}-${idx}`} className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 hover:border-[#8B5CF6]/20 transition-all">
-                  <span className="text-[10px] font-mono font-bold text-indigo-400">FEATURE 0{idx + 1}</span>
-                  <h5 className="font-bold text-sm text-white mt-1.5">{feature.name}</h5>
-                  <p className="text-xs text-gray-400 mt-2 leading-relaxed">{feature.description}</p>
-                  {feature.evidence && feature.evidence.length > 0 && (
+              {endUserUseCases.length > 0 ? endUserUseCases.slice(0, 6).map((useCase, idx) => (
+                <div key={`${useCase.title || useCase.description}-${idx}`} className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 hover:border-[#8B5CF6]/20 transition-all">
+                  <span className="text-[10px] font-mono font-bold text-indigo-400">USE CASE 0{idx + 1}</span>
+                  {useCase.title && <h5 className="font-bold text-sm text-white mt-1.5">{useCase.title}</h5>}
+                  <p className="text-xs text-gray-400 mt-2 leading-relaxed">{useCase.description}</p>
+                  {useCase.evidence && useCase.evidence.length > 0 && (
                     <p className="text-[10px] text-gray-500 mt-3 font-mono break-all">
-                      Evidence: {feature.evidence.slice(0, 2).join(', ')}
+                      Evidence: {useCase.evidence.slice(0, 2).join(', ')}
                     </p>
                   )}
                 </div>
-              )) : (
-                <p className="text-sm text-gray-400 col-span-full">{UNKNOWN_EVIDENCE}</p>
-              )}
+              )) : <p className="text-sm text-gray-400 col-span-full">No sufficiently supported end-user workflows were identified.</p>}
             </div>
           </div>
 
@@ -665,7 +677,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                 Core Modules
               </h3>
               <p className="text-xs sm:text-sm text-gray-400 max-w-2xl mt-1.5 leading-relaxed">
-                Functional building blocks inferred from repository evidence: README, routes, services, file names, structure, and detected technologies.
+                Functional modules are grounded in inspected implementation files. Connection labels appear only when source relationships are verified.
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs font-mono text-gray-400 bg-white/[0.02] border border-white/[0.06] rounded-xl px-3 py-1.5 self-start md:self-auto">
@@ -705,7 +717,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         {capability}
                       </span>
                     )) : (
-                      <span className="text-xs text-gray-500">{UNKNOWN_EVIDENCE}</span>
+                      <span className="text-xs text-gray-500">No specific capabilities were verified.</span>
                     )}
                   </div>
                 </div>
@@ -731,7 +743,11 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         {connected}
                       </span>
                     )) : (
-                      <span className="text-xs text-gray-500">{UNKNOWN_EVIDENCE}</span>
+                      <span className="text-xs text-gray-500">
+                        {module.connection_evidence_status === 'verified_none'
+                          ? 'No verified connections identified.'
+                          : 'Connections were not fully assessed for these source files.'}
+                      </span>
                     )}
                   </div>
                 </div>

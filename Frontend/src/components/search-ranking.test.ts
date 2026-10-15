@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { filterSearchResultsInBackendOrder } from './search-ranking';
+import { filterSearchResultsInBackendOrder, formatEvidenceReadiness } from './search-ranking';
 
 test('language filtering preserves backend ranking order', () => {
   const ranked = [
@@ -13,4 +13,12 @@ test('language filtering preserves backend ranking order', () => {
       .map(repo => repo.fullName),
     ['owner/relevant-ready', 'owner/next-ready'],
   );
+});
+
+test('readiness labels distinguish missing metadata and failed inspection', () => {
+  assert.equal(formatEvidenceReadiness('ready', 'inspected'), 'ready');
+  assert.equal(formatEvidenceReadiness(undefined, 'inspected'), 'not assessed');
+  assert.equal(formatEvidenceReadiness('unknown', 'not_inspected'), 'unknown (tree not inspected)');
+  assert.equal(formatEvidenceReadiness('unknown', 'inspection_failed'), 'unknown (tree inspection failed)');
+  assert.equal(formatEvidenceReadiness('not_assessed', 'not_assessed'), 'not assessed');
 });

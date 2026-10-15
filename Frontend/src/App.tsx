@@ -630,6 +630,9 @@ export default function App() {
                     module.connected_modules ||
                     [],
 
+                  connection_evidence_status:
+                    module.connection_evidence_status,
+
                   evidence:
                     module.evidence ||
                     module.components ||
