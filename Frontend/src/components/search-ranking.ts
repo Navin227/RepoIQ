@@ -18,3 +18,8 @@ export function formatEvidenceReadiness(readiness?: string, inspectionState?: st
   if (inspectionState === 'inspected') return 'not assessed';
   return 'not assessed';
 }
+
+export function shouldShowEvidenceReadiness(readiness?: string, inspectionState?: string): boolean {
+  const label = formatEvidenceReadiness(readiness, inspectionState);
+  return label !== 'not assessed' && label !== 'unknown';
+}

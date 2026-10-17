@@ -697,64 +697,34 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                     <span className="text-[10px] font-mono font-bold text-purple-400">MODULE 0{idx + 1}</span>
                     <h4 className="text-lg font-black text-white tracking-tight mt-1">{module.name}</h4>
                   </div>
-                  <span className="shrink-0 px-2 py-1 rounded-lg bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-mono font-bold">
-                    {module.confidence !== undefined ? `${module.confidence}% confidence` : 'Confidence unavailable'}
-                  </span>
+                  {module.confidence !== undefined && <span className="shrink-0 px-2 py-1 rounded-lg bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-mono font-bold">
+                    {module.confidence}% confidence
+                  </span>}
                 </div>
 
-                <div className="mt-4">
-                  <h5 className="text-xs uppercase tracking-widest text-gray-500 font-mono mb-2">Purpose</h5>
-                  <p className="text-sm text-gray-300 leading-relaxed font-sans">
-                    {module.purpose || module.description || UNKNOWN_EVIDENCE}
-                  </p>
-                </div>
-
-                <div className="mt-5">
-                  <h5 className="text-xs uppercase tracking-widest text-gray-500 font-mono mb-2">Key Capabilities</h5>
-                  <div className="flex flex-wrap gap-2">
-                    {module.capabilities.length > 0 ? module.capabilities.map((capability, capIdx) => (
-                      <span key={capIdx} className="rounded-lg bg-indigo-500/10 text-indigo-200 border border-indigo-500/15 px-2.5 py-1 text-[11px] leading-relaxed">
-                        {capability}
-                      </span>
-                    )) : (
-                      <span className="text-xs text-gray-500">No specific capabilities were verified.</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-5">
+                {module.components.length > 0 && <div className="mt-5">
                   <h5 className="text-xs uppercase tracking-widest text-gray-500 font-mono mb-2">Related Components</h5>
                   <div className="flex flex-wrap gap-2">
-                    {module.components.length > 0 ? module.components.map((component, componentIdx) => (
+                    {module.components.map((component, componentIdx) => (
                       <span key={componentIdx} className="rounded-lg bg-white/[0.04] text-gray-300 border border-white/[0.06] px-2.5 py-1 text-[11px] font-mono break-all">
                         {component}
                       </span>
-                    )) : (
-                      <span className="text-xs text-gray-500">{UNKNOWN_EVIDENCE}</span>
-                    )}
+                    ))}
                   </div>
-                </div>
+                </div>}
 
-                <div className="mt-5">
+                {module.connected_modules.length > 0 && <div className="mt-5">
                   <h5 className="text-xs uppercase tracking-widest text-gray-500 font-mono mb-2">Connected Modules</h5>
                   <div className="flex flex-wrap gap-2">
-                    {module.connected_modules.length > 0 ? module.connected_modules.map((connected, connectedIdx) => (
+                    {module.connected_modules.map((connected, connectedIdx) => (
                       <span key={connectedIdx} className="rounded-lg bg-purple-500/10 text-purple-200 border border-purple-500/15 px-2.5 py-1 text-[11px]">
                         {connected}
                       </span>
-                    )) : (
-                      <span className="text-xs text-gray-500">
-                        {module.connection_evidence_status === 'verified_none'
-                          ? 'No verified connections identified.'
-                          : 'Connections were not fully assessed for these source files.'}
-                      </span>
-                    )}
+                    ))}
                   </div>
-                </div>
+                </div>}
               </div>
-            )) : (
-              <p className="text-sm text-gray-400 col-span-full">{UNKNOWN_EVIDENCE}</p>
-            )}
+            )) : null}
           </div>
         </div>
       )}

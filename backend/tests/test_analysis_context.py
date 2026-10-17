@@ -70,6 +70,7 @@ def test_context_batches_are_bounded_and_manifest_marks_omissions(monkeypatch, t
     assert bundle["limitations"]["unresolved_questions"]
     assert bundle["limitations"]["conflicting_findings"]
     assert bundle["coverage_gate"]["status"] == "sufficient"
+    assert bundle["coverage_gate"]["core_execution_paths_sufficiently_covered"] is True
 
 
 def test_library_without_executable_entrypoint_can_have_sufficient_core_coverage(monkeypatch, tmp_path):

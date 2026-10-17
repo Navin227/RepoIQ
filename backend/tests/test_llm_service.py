@@ -561,6 +561,7 @@ def test_grok_input_budget_records_omissions_and_removes_duplicate_tree():
     assert manifest["omitted_source_ranges"]
     assert all(item["reason"] == "grok_input_token_budget" for item in manifest["omitted_source_ranges"])
     assert any(item["path"] == "main.py" for item in provider["context_bundle"]["source_excerpts"])
+    assert provider["context_bundle"]["coverage_gate"]["status"] == "sufficient"
     assert "file_tree" not in provider
     assert {item["field"] for item in manifest["omitted_fields"]} >= {"file_tree"}
     assert "grok_input_manifest" in prompt

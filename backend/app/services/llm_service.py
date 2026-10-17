@@ -121,7 +121,7 @@ def _fit_grok_input(payload: Dict[str, Any], instructions: str, count_tokens, bu
         token_count = measure(prompt)
 
     manifest["estimated_tokens"] = token_count
-    dropped_critical = sorted({item["path"] for item in omissions if coverage_files.get(item["path"], {}).get("important_to_execution_path")})
+    dropped_critical = sorted({path for path, entry in coverage_files.items() if entry.get("important_to_execution_path") and not entry.get("grok_supplied_line_ranges")})
     if dropped_critical:
         gate = provider_payload.get("coverage_gate") or context_bundle.get("coverage_gate")
         if isinstance(gate, dict):

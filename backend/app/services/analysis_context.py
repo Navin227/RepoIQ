@@ -436,9 +436,11 @@ def prepare_context(metadata: dict[str, Any], scan: dict[str, Any], repo_path: s
     manifest["unreadable_count"] = sum(e["status"] == "unreadable" for e in records)
     source_entries = [e for e in records if e["file_type"] in SOURCE_SUFFIXES and "test" not in e.get("roles", [])]
     important_entries = [e for e in source_entries if "entry_point" in e["roles"]]
-    inspected_entries = [e for e in important_entries if e["status"] == "fully_inspected"]
-    fully_inspected_paths = {e["path"] for e in records if e["status"] == "fully_inspected"}
-    critical = [e for e in records if e["important_to_execution_path"] and e["file_type"] in SOURCE_SUFFIXES and e["path"] not in fully_inspected_paths]
+    # Bounded excerpts can cover important behavior. Coverage is missing only
+    # when no source from that execution path reached Gemma.
+    inspected_entries = [e for e in important_entries if e["status"] in STATUS_INSPECTED and e.get("gemma_processed") and e.get("line_ranges_supplied")]
+    inspected_paths = {e["path"] for e in records if e["status"] in STATUS_INSPECTED and e.get("gemma_processed") and e.get("line_ranges_supplied")}
+    critical = [e for e in records if e["important_to_execution_path"] and e["file_type"] in SOURCE_SUFFIXES and e["path"] not in inspected_paths]
     if important_entries:
         core_covered = len(inspected_entries) == len(important_entries) and not critical
     elif source_entries:
