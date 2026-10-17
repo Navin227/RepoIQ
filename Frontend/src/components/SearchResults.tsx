@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Star, GitFork, BookMarked, Terminal, SlidersHorizontal, 
-  ChevronRight, Check, Search, Sparkles,
-  Clock, Trash2, ChevronDown, ArrowRight 
+  ChevronRight, Check, Search, Sparkles, ArrowRight
 } from 'lucide-react';
 import { SimilarRepo } from '../types';
 import { filterSearchResultsInBackendOrder, formatEvidenceReadiness, shouldShowEvidenceReadiness } from './search-ranking';
@@ -26,16 +25,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
   // Intelligent local search bar states
   const [localQuery, setLocalQuery] = useState(query && query !== 'Featured Repositories' ? query : '');
   
-  // Custom recent search history store
-  const [recentSearchHistory, setRecentSearchHistory] = useState<string[]>([
-    'file sharing platform',
-    'kubernetes dashboard',
-    'ai chatbot',
-    'supabase self-hosted instructions',
-    'https://github.com/microsoft/TypeScript'
-  ]);
-  const [isHistoryExpanded, setIsHistoryExpanded] = useState<boolean>(true);
-
   // Sync prop changes back to local query state
   useEffect(() => {
     if (query && query !== 'Featured Repositories') {
@@ -54,24 +43,11 @@ export default function SearchResults({ query, results, isLoading, error, analyz
     'video processing platform'
   ];
 
-  // Helper to prepend search elements securely
-  const addToHistory = (text: string) => {
-    setRecentSearchHistory(prev => {
-      const filtered = prev.filter(item => item.toLowerCase() !== text.toLowerCase());
-      return [text, ...filtered].slice(0, 8); // Keep last 8 unique items
-    });
-  };
-
-  const removeFromHistory = (text: string) => {
-    setRecentSearchHistory(prev => prev.filter(item => item !== text));
-  };
-
   const handleLocalSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!localQuery.trim()) return;
 
     const trimmed = localQuery.trim();
-    addToHistory(trimmed);
 
     // Smart Router: check if input matches GitHub URL or repository coordinates e.g. vercel/next.js
     onSearch(trimmed);
@@ -79,7 +55,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
 
   const handleChipClick = (value: string) => {
     setLocalQuery(value);
-    addToHistory(value);
 
     onSearch(value);
   };
@@ -184,7 +159,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
       {/* 3. Main content grid */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
         
-        {/* Left Sidebar Filtering & History Panels */}
+        {/* Left Sidebar Filters */}
         <div className="space-y-6">
           
           {/* Languages Filter */}
@@ -213,61 +188,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
                 </button>
               ))}
             </div>
-          </div>
-
-          {/* Collapsible Recent Search History Panel */}
-          <div className="rounded-2xl bg-white/[0.02] border border-white/[0.08] overflow-hidden" id="explore-history-panel">
-            <button 
-              onClick={() => setIsHistoryExpanded(!isHistoryExpanded)}
-              className="w-full flex items-center justify-between px-5 py-4 font-bold text-white text-sm tracking-wide font-sans uppercase bg-white/[0.01] hover:bg-white/[0.03] transition-colors cursor-pointer"
-            >
-              <div className="flex items-center gap-2">
-                <Clock className="h-4 w-4 text-[#8B5CF6]" />
-                Recent History
-              </div>
-              <ChevronDown className={`h-4 w-4 text-gray-500 transition-transform duration-200 ${isHistoryExpanded ? 'rotate-180' : ''}`} />
-            </button>
-            
-            {isHistoryExpanded && (
-              <div className="p-4 space-y-2.5 border-t border-white/[0.04]">
-                {recentSearchHistory.length === 0 ? (
-                  <p className="text-xs text-gray-500 text-center py-2 font-mono">No searches performed.</p>
-                ) : (
-                  <div className="space-y-1 max-h-48 overflow-y-auto scrollbar-none">
-                    {recentSearchHistory.map((item, index) => (
-                      <div 
-                        key={index}
-                        className="flex items-center justify-between group/history rounded-lg hover:bg-white/[0.02] px-2 py-1 transition-colors"
-                      >
-                        <button
-                          onClick={() => handleChipClick(item)}
-                          className="flex-1 text-left text-xs font-mono text-gray-400 hover:text-[#8B5CF6] truncate cursor-pointer mr-2 pr-1"
-                          title={item}
-                        >
-                          {item}
-                        </button>
-                        <button
-                          onClick={() => removeFromHistory(item)}
-                          className="p-1 rounded text-gray-600 hover:text-red-400 hover:bg-white/[0.05] opacity-0 group-hover/history:opacity-100 transition-opacity cursor-pointer"
-                          title="Delete"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                
-                {recentSearchHistory.length > 0 && (
-                  <button
-                    onClick={() => setRecentSearchHistory([])}
-                    className="w-full text-center text-[10px] uppercase font-mono text-gray-500 hover:text-white pt-2 border-t border-white/[0.02] cursor-pointer block bg-transparent border-0"
-                  >
-                    Clear History
-                  </button>
-                )}
-              </div>
-            )}
           </div>
 
         </div>
