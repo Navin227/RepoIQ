@@ -376,6 +376,7 @@ export interface AnalyzeRepositoryResponse {
   analysis_run_id?: string;
   error_code?: string;
   error?: string;
+  detail?: unknown;
   repo_name?: string;
   repo_url?: string;
   local_path?: string;
@@ -645,8 +646,27 @@ export async function analyzeRepository(
     const responseRunId = result.analysis_run_id || runId;
     if (!response.ok || result.status === 'error' || (Boolean(result.error?.trim()) && result.status !== 'success')) {
       const code = result.error_code || `http_${response.status}`;
-      const reason = result.error?.trim() || result.message?.trim() || result.error_code
-        || `Analysis failed. Correlation ID: ${responseRunId}`;
+      const detail = result.detail;
+      const detailMessage = typeof detail === 'string'
+        ? detail.trim()
+        : detail && typeof detail === 'object' && !Array.isArray(detail)
+          ? [
+              (detail as Record<string, unknown>).message,
+              (detail as Record<string, unknown>).detail,
+              (detail as Record<string, unknown>).error,
+            ].find((value): value is string => typeof value === 'string' && Boolean(value.trim()))?.trim()
+          : Array.isArray(detail)
+            ? detail.slice(0, 3).map((item) => {
+                if (!item || typeof item !== 'object') return String(item);
+                const entry = item as Record<string, unknown>;
+                const location = Array.isArray(entry.loc) ? entry.loc.join('.') : '';
+                return [location, typeof entry.msg === 'string' ? entry.msg : ''].filter(Boolean).join(': ');
+              }).filter(Boolean).join('; ')
+            : undefined;
+      const serverMessage = result.error?.trim() || result.message?.trim() || detailMessage || result.error_code;
+      const reason = serverMessage
+        ? `${serverMessage} (HTTP ${response.status}; ${code}). Correlation ID: ${responseRunId}`
+        : `Analysis request failed (HTTP ${response.status}; ${code}). Correlation ID: ${responseRunId}`;
       log('analysis_failed', { http_status: response.status, error_code: code, analysis_status: result.analysis_status || 'error' });
       return { status: 'error', analysis_run_id: responseRunId, error: reason };
     }
@@ -768,6 +788,6 @@ export async function analyzeRepository(
     return { status: 'error', analysis_run_id: runId,
       error: signal?.aborted
         ? `Analysis timed out before a result was received. Correlation ID: ${runId}`
-        : `Analysis request failed. Correlation ID: ${runId}` };
+        : `${error instanceof Error ? error.message : 'Analysis request failed'} Correlation ID: ${runId}` };
   }
 }

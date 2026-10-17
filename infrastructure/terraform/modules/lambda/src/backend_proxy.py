@@ -57,13 +57,20 @@ def _running_instance_public_ip() -> str | None:
             {"Name": "instance-state-name", "Values": ["running"]},
         ]
     )
-    instances = [
+    matching_instances = [
         instance
         for reservation in response.get("Reservations", [])
         for instance in reservation.get("Instances", [])
-        if instance.get("PublicIpAddress")
     ]
+    instances = [instance for instance in matching_instances if instance.get("PublicIpAddress")]
     if not instances:
+        logger.error(
+            "No running demo instance with a public IP matched backend proxy filters "
+            "(project=%s, environment=%s, matching_instances=%s).",
+            PROJECT_NAME,
+            ENVIRONMENT,
+            len(matching_instances),
+        )
         return None
     if len(instances) > 1:
         instances.sort(key=lambda instance: instance.get("LaunchTime"), reverse=True)

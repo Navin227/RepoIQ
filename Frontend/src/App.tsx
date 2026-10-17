@@ -393,13 +393,19 @@ export default function App() {
    */
   const demoApiUrl =
     demoStatus?.application_url?.trim() || null;
-  // TEMPORARY: analysis/search do not wait for EC2/K3s readiness while the
-  // backend path is being inspected. Restore the readiness gate after recovery.
-  // The API endpoint itself remains required to produce repository evidence.
-  const analysisApiAvailable = Boolean(
-    getDevelopmentApiBaseOverride() ||
+  const hasDevelopmentApiOverride = Boolean(getDevelopmentApiBaseOverride());
+  const analysisApiConfigured = Boolean(
+    hasDevelopmentApiOverride ||
     import.meta.env.VITE_API_BASE_URL?.trim() ||
     demoApiUrl
+  );
+  // A configured Lambda URL does not mean its EC2 backend is available.
+  // In demo mode, only submit analysis once the control plane confirms the
+  // backend has completed initialization and is ready to accept requests.
+  const analysisApiAvailable = analysisApiConfigured && (
+    hasDevelopmentApiOverride ||
+    !DEMO_CONTROL_API_BASE ||
+    serverStatus === 'online'
   );
 
   // ──────────────────────────────────────────────
@@ -468,6 +474,20 @@ export default function App() {
   const handleAnalyze = async (
     repoUrl: string
   ) => {
+    if (!analysisApiAvailable) {
+      if (DEMO_CONTROL_API_BASE && !hasDevelopmentApiOverride) {
+        const readinessMessage = serverStatus === 'starting' || serverStatus === 'checking'
+          ? 'The RepoIQ demo server is still starting. Wait until it reports Server Online, then try the analysis again.'
+          : serverStatus === 'failed'
+            ? demoErrorMsg || 'RepoIQ demo server initialization failed. Review its startup details before retrying.'
+            : 'RepoIQ demo server is offline. Start it from Demo Infrastructure before analyzing a repository.';
+        setDemoErrorMsg(readinessMessage);
+        setCurrentTab('home');
+      } else {
+        setSearchError('RepoIQ analysis API is not configured.');
+      }
+      return;
+    }
     if (analysisRequestRef.current) return;
     const analysisRunId = crypto.randomUUID();
     const controller = new AbortController();
@@ -908,7 +928,8 @@ export default function App() {
 
           if (
             authoritativeStatus === 'running' &&
-            (initializationState === 'ready' || status.readiness?.state === 'ready')
+            (initializationState === 'ready' || status.readiness?.state === 'ready') &&
+            Boolean(status.public_ip && status.application_url)
           ) {
             applicationReadyRef.current = true;
             setServerStatus('online');
@@ -1568,6 +1589,18 @@ export default function App() {
       />
 
       <main className="flex-grow">
+        {DEMO_CONTROL_API_BASE && serverStatus !== 'online' && currentTab !== 'home' && (
+          <div role="status" aria-live="polite" className="mx-auto mt-5 max-w-7xl px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              <span>{serverStatus === 'starting' || serverStatus === 'checking'
+                ? 'Analysis is unavailable until the RepoIQ demo server finishes starting.'
+                : serverStatus === 'failed'
+                  ? 'The RepoIQ demo server failed to start, so analysis requests are paused.'
+                  : 'The RepoIQ demo server is offline, so analysis requests are paused.'}</span>
+              <button onClick={() => setCurrentTab('home')} className="rounded-lg border border-amber-100/20 px-3 py-1.5 hover:bg-amber-100/10">Open demo controls</button>
+            </div>
+          </div>
+        )}
         {analyzingRepoUrl && (
           <div role="status" aria-live="polite" className="mx-auto mt-5 max-w-7xl px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-3 rounded-xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
