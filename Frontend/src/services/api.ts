@@ -403,6 +403,66 @@ export interface AnalyzeRepositoryResponse {
   message?: string;
 }
 
+export interface RepositoryHistoryItem {
+  id: number;
+  github_url: string;
+  full_name: string;
+  description?: string | null;
+  stars?: number | null;
+  primary_language?: string | null;
+  created_at: string;
+  analysis_result?: {
+    stack?: AnalyzeRepositoryResponse['stack'];
+    overview?: string | null;
+    modules?: BusinessModule[] | null;
+    architecture_summary?: string | null;
+    similar_repositories?: SimilarRepo[] | null;
+    readme?: string | null;
+    readme_path?: string | null;
+    folder_structure?: FileTreeNode[] | null;
+    languages?: string[] | null;
+    architecture?: ArchitectureAnalysis | null;
+    executive_overview?: ExecutiveOverview | null;
+    analysis_evidence?: Record<string, unknown> | null;
+    analysis_status?: string | null;
+    commit_sha?: string | null;
+    repository_model?: Record<string, unknown> | null;
+    created_at: string;
+  } | null;
+}
+
+export interface RepositoryHistoryPage {
+  items: RepositoryHistoryItem[];
+  offset: number;
+  limit: number;
+  total: number;
+}
+
+export async function fetchRepositoryHistory(
+  offset = 0,
+  limit = 20,
+  runtimeApiBase?: string | null,
+): Promise<RepositoryHistoryPage> {
+  const apiBase = resolveApiBase({
+    configuredApiBase: import.meta.env.VITE_API_BASE_URL,
+    runtimeApiBase,
+    developmentApiBase: getDevelopmentApiBaseOverride(),
+    pageOrigin: window.location.origin,
+  });
+  if (!apiBase) throw new Error('RepoIQ API URL is unavailable. Configure a backend API endpoint first.');
+
+  const url = new URL(`${apiBase}/api/repositories/history`);
+  url.searchParams.set('offset', String(Math.max(0, offset)));
+  url.searchParams.set('limit', String(Math.min(100, Math.max(1, limit))));
+  const response = await fetchWithDefensiveRetry(url.toString(), { cache: 'no-store' }, 'Repository history');
+  if (!response.ok) throw new Error(`History could not be loaded (HTTP ${response.status}).`);
+  const page: unknown = await response.json();
+  if (!page || typeof page !== 'object' || !Array.isArray((page as RepositoryHistoryPage).items)) {
+    throw new Error('Repository history returned an invalid response.');
+  }
+  return page as RepositoryHistoryPage;
+}
+
 function sanitizeAnalysisLog(value: unknown, depth = 0): unknown {
   if (depth > 5) return '[nested value omitted]';
   if (typeof value === 'string') {

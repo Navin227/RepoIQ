@@ -305,6 +305,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
   }, [repo.fullName]);
 
   const overviewData = getNonTechnicalOverview(repo);
+  const headerDescription = getEvidenceText(repo.description);
   const architectureData = repo.architecture;
   const architecturePrimarySummary = getEvidenceText(architectureData?.architecture_summary);
   const architectureSummary = architecturePrimarySummary !== UNKNOWN_EVIDENCE
@@ -510,13 +511,11 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
               <ExternalLink className="h-3.5 w-3.5" />
               <span>GitHub Link</span>
             </a>
-            <span className={`inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium ${['complete', 'ai_generated'].includes(repo.analysisStatus || '') ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : repo.analysisStatus === 'unavailable' || repo.analysisStatus === 'failed' ? 'border-red-400/20 bg-red-400/10 text-red-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
+            {repo.analysisStatus !== 'partial' && <span className={`inline-flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium ${['complete', 'ai_generated'].includes(repo.analysisStatus || '') ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : repo.analysisStatus === 'unavailable' || repo.analysisStatus === 'failed' ? 'border-red-400/20 bg-red-400/10 text-red-200' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
               {['complete', 'ai_generated'].includes(repo.analysisStatus || '') ? 'Evidence analysis complete' : `Analysis ${repo.analysisStatus || 'status unavailable'}`}
-            </span>
+            </span>}
           </div>
-          <p className="text-sm text-gray-400 mt-2 max-w-2xl font-sans leading-relaxed">
-            {getEvidenceText(repo.description)}
-          </p>
+          {headerDescription !== UNKNOWN_EVIDENCE && <p className="text-sm text-gray-400 mt-2 max-w-2xl font-sans leading-relaxed">{headerDescription}</p>}
         </div>
 
         {/* Saved Favorites & Share layout buttons */}
@@ -697,9 +696,6 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                     <span className="text-[10px] font-mono font-bold text-purple-400">MODULE 0{idx + 1}</span>
                     <h4 className="text-lg font-black text-white tracking-tight mt-1">{module.name}</h4>
                   </div>
-                  {module.confidence !== undefined && <span className="shrink-0 px-2 py-1 rounded-lg bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-mono font-bold">
-                    {module.confidence}% confidence
-                  </span>}
                 </div>
 
                 {module.components.length > 0 && <div className="mt-5">

@@ -5,10 +5,12 @@ import Features from './components/Features';
 import DemoInfrastructureCard from './components/DemoInfrastructureCard';
 import SearchResults from './components/SearchResults';
 import AnalysisDashboard from './components/AnalysisDashboard';
+import HistoryPage from './components/HistoryPage';
 import AnalysisDiagnosticsBoundary from './components/AnalysisDiagnosticsBoundary';
 import { getOrCreateRepository } from './data';
 import {
   analyzeRepository,
+  RepositoryHistoryItem,
   searchRepositories,
 } from './services/api';
 import { getDevelopmentApiBaseOverride } from './services/api-base';
@@ -1509,6 +1511,62 @@ export default function App() {
       return list;
     };
 
+  const openHistoryEntry = (entry: RepositoryHistoryItem) => {
+    const saved = entry.analysis_result;
+    if (!saved) return;
+    const [owner = '', name = entry.full_name] = entry.full_name.split('/');
+    const categories = saved.stack?.flat || saved.stack?.categories || {};
+    setAnalyzedRepo({
+      owner,
+      name,
+      fullName: entry.full_name,
+      url: entry.github_url,
+      description: entry.description || '',
+      stars: entry.stars ?? undefined,
+      language: entry.primary_language || undefined,
+      localPath: undefined,
+      readme: saved.readme || '',
+      readmePath: saved.readme_path || undefined,
+      overview: {
+        aiSummary: saved.overview || saved.executive_overview?.one_line_summary || '',
+        executiveOverview: saved.executive_overview || undefined,
+      },
+      analysis: {
+        projectSummary: saved.overview || saved.architecture_summary || '',
+        techStack: {
+          frontend: categories.frontend || [],
+          backend: categories.backend || [],
+          database: categories.database || [],
+          infrastructure: categories.infrastructure || [],
+          devops: categories.devops || [],
+          ...categories,
+        },
+        keyFeatures: (saved.executive_overview?.user_features || []).map((feature) => feature.name).filter(Boolean).slice(0, 10),
+        businessModules: (saved.modules || []).map((module) => ({
+          name: module.name,
+          purpose: module.purpose || module.description || '',
+          description: module.description || module.purpose || '',
+          capabilities: module.capabilities || [],
+          components: module.components || [],
+          connected_modules: module.connected_modules || [],
+          connection_evidence_status: module.connection_evidence_status,
+          evidence: module.evidence || module.components || [],
+          confidence: module.confidence,
+        })),
+      },
+      folderStructure: saved.folder_structure || [],
+      similarRepos: saved.similar_repositories || [],
+      languages: saved.languages || [],
+      rawStack: saved.stack,
+      architecture: saved.architecture || undefined,
+      analysisEvidence: saved.analysis_evidence || {},
+      analysisStatus: saved.analysis_status || undefined,
+      commitSha: saved.commit_sha || undefined,
+      repositoryModel: saved.repository_model || undefined,
+    });
+    setCurrentTab('analyze');
+  };
+
   // ──────────────────────────────────────────────
   // Render
   // ──────────────────────────────────────────────
@@ -1996,62 +2054,12 @@ export default function App() {
               )}
             </div>
           )}
+
+        {currentTab === 'history' && (
+          <HistoryPage onOpen={openHistoryEntry} onAnalyze={handleAnalyze} />
+        )}
       </main>
 
-      {/* Footer */}
-      <footer
-        className="border-t border-white/[0.05] bg-black/30 py-8 px-4"
-        id="platform-footer"
-      >
-        <div className="mx-auto max-w-7xl flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-gray-500 font-mono">
-          <div className="flex items-center gap-2">
-            <span className="text-gray-400 font-bold tracking-tight">
-              RepoIQ
-            </span>
-
-            <span>
-              &copy;{' '}
-              {new Date().getFullYear()}{' '}
-              Platform Inc. All rights reserved.
-            </span>
-          </div>
-
-          <div className="flex flex-wrap gap-4">
-            <button
-              onClick={() =>
-                setCurrentTab(
-                  'home'
-                )
-              }
-              className="hover:text-white cursor-pointer"
-            >
-              Security
-            </button>
-
-            <button
-              onClick={() =>
-                setCurrentTab(
-                  'home'
-                )
-              }
-              className="hover:text-white cursor-pointer"
-            >
-              Privacy Policy
-            </button>
-
-            <button
-              onClick={() =>
-                setCurrentTab(
-                  'home'
-                )
-              }
-              className="hover:text-white cursor-pointer"
-            >
-              Contact
-            </button>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

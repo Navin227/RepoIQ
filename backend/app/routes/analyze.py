@@ -6,6 +6,7 @@ import subprocess
 import hashlib
 import uuid
 import time
+from datetime import datetime
 import re
 from pathlib import Path, PurePosixPath
 from typing import List, Optional, Any
@@ -1205,6 +1206,7 @@ def _run_analysis(
             result.analysis_status = analysis_status
             result.commit_sha = commit_sha
             result.repository_model = repository_model.model_dump(mode="json")
+            result.created_at = datetime.utcnow()
 
             db.commit()
             db.refresh(repository)

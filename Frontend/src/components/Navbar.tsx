@@ -39,7 +39,8 @@ export default function Navbar({
     { id: 'home', label: 'Home' },
     { id: 'explore', label: 'Explore' },
     { id: 'analyze', label: 'Analyze' },
-    { id: 'saved', label: 'Saved', count: savedCount }
+    { id: 'saved', label: 'Saved', count: savedCount },
+    { id: 'history', label: 'History' }
   ];
 
   // Determine if demo is currently running
