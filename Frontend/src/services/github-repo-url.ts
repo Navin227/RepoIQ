@@ -40,5 +40,9 @@ export function getSavedRepositoryAnalysisUrl(repository: {
   fullName: string;
   url?: string;
 }): string {
+  const canonicalName = normalizeGitHubRepoInput(repository.fullName);
+  if (/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/i.test(canonicalName)) {
+    return canonicalName;
+  }
   return normalizeGitHubRepoInput(repository.url?.trim() || repository.fullName);
 }

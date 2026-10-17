@@ -456,6 +456,9 @@ export async function fetchRepositoryHistory(
   url.searchParams.set('offset', String(Math.max(0, offset)));
   url.searchParams.set('limit', String(Math.min(100, Math.max(1, limit))));
   const response = await fetchWithDefensiveRetry(url.toString(), { cache: 'no-store' }, 'Repository history');
+  if (response.status === 404) {
+    throw new Error('The deployed backend-proxy Lambda does not expose the history route yet. Redeploy the Lambda from infrastructure/terraform/modules/lambda to enable PostgreSQL history.');
+  }
   if (!response.ok) throw new Error(`History could not be loaded (HTTP ${response.status}).`);
   const page: unknown = await response.json();
   if (!page || typeof page !== 'object' || !Array.isArray((page as RepositoryHistoryPage).items)) {

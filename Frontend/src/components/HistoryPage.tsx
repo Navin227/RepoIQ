@@ -28,7 +28,7 @@ function stackPreview(entry: RepositoryHistoryItem): string[] {
   const flat = stack?.flat || stack?.categories || {};
   return [...new Set(Object.values(flat).flatMap((items) =>
     Array.isArray(items) ? items.map((item) => typeof item === 'string' ? item : item?.name).filter((name): name is string => Boolean(name)) : []
-  ))].slice(0, 5);
+  ))];
 }
 
 export default function HistoryPage({ onOpen, onAnalyze }: HistoryPageProps) {
@@ -91,6 +91,7 @@ export default function HistoryPage({ onOpen, onAnalyze }: HistoryPageProps) {
                 || result?.overview;
               const stack = stackPreview(entry);
               const modules = (result?.modules || []).map((module) => module.name).filter(Boolean).slice(0, 4);
+              const languages = result?.languages || [];
               return (
                 <article key={entry.id} className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5 sm:p-6 hover:border-[#8B5CF6]/30 transition-colors">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -113,6 +114,12 @@ export default function HistoryPage({ onOpen, onAnalyze }: HistoryPageProps) {
                         {stack.map((technology) => <span key={`tech-${technology}`} className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[11px] text-gray-300">{technology}</span>)}
                         {modules.map((module) => <span key={`module-${module}`} className="rounded-md border border-purple-500/15 bg-purple-500/5 px-2 py-1 text-[11px] text-purple-200">{module}</span>)}
                       </div>}
+                      {(result?.architecture_summary?.trim() || languages.length > 0 || result?.readme_path) && <details className="mt-4 border-t border-white/[0.06] pt-3">
+                        <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-200">Saved analysis metadata</summary>
+                        {result?.architecture_summary?.trim() && <p className="mt-3 max-w-4xl text-sm leading-relaxed text-gray-300">{result.architecture_summary}</p>}
+                        {languages.length > 0 && <p className="mt-2 text-xs text-gray-400">Languages: {languages.join(', ')}</p>}
+                        {result?.readme_path && <p className="mt-1 text-xs text-gray-500">README: <span className="font-mono">{result.readme_path}</span></p>}
+                      </details>}
                       {!result && <p className="mt-4 text-sm text-amber-200">No saved analysis result is available for this repository.</p>}
                     </div>
                     <div className="flex shrink-0 items-center gap-3">

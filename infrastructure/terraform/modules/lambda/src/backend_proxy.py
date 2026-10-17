@@ -34,6 +34,7 @@ def _response(status_code: int, body: dict | str, content_type: str = "applicati
 
 
 def _is_allowed_route(method: str, path: str) -> bool:
+    path = path.rstrip("/") or "/"
     if method == "GET" and path in {"/health", "/search"}:
         return True
     if method == "POST" and path == "/analyze":
@@ -121,6 +122,7 @@ def lambda_handler(event, context):
     http = request_context.get("http") or {}
     method = str(http.get("method") or event.get("httpMethod") or "").upper()
     path = event.get("rawPath") or event.get("path") or ""
+    path = path.rstrip("/") or "/"
 
     if not _is_allowed_route(method, path):
         return _response(404, {"detail": "Backend route not found."})

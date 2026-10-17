@@ -475,14 +475,15 @@ export default function App() {
     const timeoutId = window.setTimeout(() => controller.abort(), 5 * 60 * 1000);
     const analysisLog = (event: string, fields: Record<string, unknown> = {}) =>
       console.info('[RepoIQ analysis]', { analysis_run_id: analysisRunId, event, ...fields });
-    analysisLog('analyze_button_clicked', { repository_url: repoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
-    const fullName = getRepoFullName(repoUrl);
+    const analysisRepoUrl = normalizeGitHubRepoInput(repoUrl);
+    analysisLog('analyze_button_clicked', { repository_url: analysisRepoUrl.replace(/\/\/[^/@]+@/, '//[redacted]@').split('?')[0] });
+    const fullName = getRepoFullName(analysisRepoUrl);
     const [owner = '', name = ''] = fullName.split('/');
     setAnalyzedRepo({
       owner,
       name,
       fullName,
-      url: repoUrl,
+      url: analysisRepoUrl,
       description: '',
       overview: { aiSummary: '' },
       analysis: {
@@ -496,18 +497,19 @@ export default function App() {
       analysisStatus: 'running',
       analysisRunId,
     });
-    setAnalyzingRepoUrl(repoUrl);
+    setCurrentTab('analyze');
+    setAnalyzingRepoUrl(analysisRepoUrl);
 
     setAnalyzeMessageByUrl(prev => ({
       ...prev,
-      [repoUrl]: '',
+      [analysisRepoUrl]: '',
     }));
 
     try {
       const result =
         await analyzeRepository(
           {
-            repo_url: repoUrl,
+            repo_url: analysisRepoUrl,
             analysis_run_id: analysisRunId,
           },
           demoApiUrl,
@@ -521,7 +523,7 @@ export default function App() {
       if (result.status === 'success') {
         const fullName =
           getRepoFullName(
-            result.repoUrl ?? repoUrl
+            result.repoUrl ?? analysisRepoUrl
           );
 
         const [
@@ -535,7 +537,7 @@ export default function App() {
           fullName,
           url:
             result.repoUrl ??
-            repoUrl,
+            analysisRepoUrl,
           description: '',
 
           localPath:
@@ -633,7 +635,7 @@ export default function App() {
 
         setAnalyzeMessageByUrl(prev => ({
           ...prev,
-          [repoUrl]: '',
+          [analysisRepoUrl]: '',
         }));
 
         if (result.analysis_status !== 'failed') setCurrentTab('analyze');
@@ -644,7 +646,7 @@ export default function App() {
           : current);
         setAnalyzeMessageByUrl(prev => ({
           ...prev,
-          [repoUrl]:
+          [analysisRepoUrl]:
             result.error ||
             'Failed to clone repository',
         }));
@@ -659,7 +661,7 @@ export default function App() {
         : current);
       setAnalyzeMessageByUrl(prev => ({
         ...prev,
-        [repoUrl]: 'RepoIQ analyze request failed.',
+        [analysisRepoUrl]: 'RepoIQ analyze request failed.',
       }));
     } finally {
       window.clearTimeout(timeoutId);
