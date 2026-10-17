@@ -59,21 +59,44 @@ def test_narrative_filter_keeps_a_supported_sentence_and_drops_only_the_unsuppor
 
 def test_architecture_keeps_verified_claims_across_categories_and_generic_names():
     claims = [
-        SimpleNamespace(state="confirmed", category="data_flow", text="Checkout writes order records", target_name="Checkout", subject="", evidence=[object()]),
-        SimpleNamespace(state="inferred", category="integration", text="Order persistence uses the database adapter", target_name="Order database", subject="", evidence=[object()]),
+        SimpleNamespace(state="confirmed", category="data_flow", text="Checkout submits purchases and writes order records", target_name="Checkout", subject="", evidence=[object()]),
+        SimpleNamespace(state="inferred", category="integration", text="Order database stores order records", target_name="Order database", subject="", evidence=[object()]),
     ]
     result = _filter_architecture({
         "summary": "Checkout writes orders and the database stores them.",
         "components": [
-            {"name": "Checkout", "responsibility": "Submits purchases."},
-            {"name": "Order database", "responsibility": "Persists orders."},
+            {"name": "Checkout", "responsibility": "Checkout submits purchases and writes order records."},
+            {"name": "Order database", "responsibility": "Order database stores order records."},
             {"name": "Unrelated metrics pipeline", "responsibility": "Collects unrelated counters."},
         ],
-        "flow": ["Checkout submits an order", "Telemetry samples system latency"],
+            "flow": ["Checkout submits purchases and writes order records", "Telemetry samples system latency"],
     }, claims)
 
     assert [item["name"] for item in result["components"]] == ["Checkout", "Order database"]
-    assert result["flow"] == ["Checkout submits an order"]
+    assert result["flow"] == ["Checkout submits purchases and writes order records"]
+
+
+def test_architecture_edges_require_validated_relationship_and_distinguish_unassessed():
+    claims = [SimpleNamespace(
+        state="confirmed", category="architecture",
+        text="Checkout submits orders and purchases.", target_name="Checkout", subject="",
+        evidence=[object()],
+    ), SimpleNamespace(
+        state="confirmed", category="architecture",
+        text="Database stores order records.", target_name="Database", subject="",
+        evidence=[object()],
+    )]
+    result = _filter_architecture({"components": [
+        {"name": "Checkout", "responsibility": "Checkout submits orders and purchases.", "connected_to": ["Database"]},
+        {"name": "Database", "responsibility": "Database stores order records."},
+        {"name": "Response", "responsibility": "Provides a generic runtime responsibility."},
+    ]}, claims, module_connection_status={"database": "verified_none"})
+
+    by_name = {item["name"]: item for item in result["components"]}
+    assert set(by_name) == {"Checkout", "Database"}
+    assert "connected_to" not in by_name["Checkout"]
+    assert by_name["Checkout"]["connection_evidence_status"] == "not_fully_assessed"
+    assert by_name["Database"]["connection_evidence_status"] == "verified_none"
 
 
 def test_coverage_filter_distinguishes_partial_ranges_and_keeps_valid_reference():

@@ -242,6 +242,47 @@ class GitHubService:
                     for path in paths
                 )
 
+        # README usefulness is assessed only for a small, relevance-leading
+        # subset that actually has a README. Other candidates retain an
+        # unknown README-quality value instead of being treated as poor.
+        readme_candidates = [
+            item for item in candidates
+            if item.get("_tree_inspection_state") == "inspected" and item.get("_readme_present")
+        ][:10]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self._fetch_candidate_readme, item): item for item in readme_candidates}
+            for future in as_completed(futures):
+                candidate = futures[future]
+                try:
+                    candidate["_readme_text"] = future.result()
+                except Exception as exc:
+                    candidate["_readme_text"] = None
+                    logger.info(
+                        "Could not inspect README for %s (%s)",
+                        candidate.get("full_name", candidate.get("name")),
+                        type(exc).__name__,
+                    )
+
+    def _fetch_candidate_readme(self, candidate: dict) -> str | None:
+        owner = candidate.get("owner")
+        owner_name = owner.get("login") if isinstance(owner, dict) else owner
+        full_name = str(candidate.get("full_name") or f"{owner_name}/{candidate.get('name', '')}")
+        if full_name.count("/") != 1:
+            return None
+        with httpx.Client(headers=self._headers(), timeout=6) as client:
+            response = client.get(f"https://api.github.com/repos/{full_name}/readme")
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            payload = response.json()
+        content = payload.get("content") if isinstance(payload, dict) else None
+        if not isinstance(content, str):
+            return None
+        try:
+            return base64.b64decode(content, validate=False).decode("utf-8", errors="replace")[:30_000]
+        except (ValueError, TypeError):
+            return None
+
     def _fetch_candidate_tree(self, candidate: dict) -> list[str]:
         owner = candidate.get("owner")
         owner_name = owner.get("login") if isinstance(owner, dict) else owner

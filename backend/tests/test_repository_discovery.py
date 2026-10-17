@@ -5,6 +5,7 @@ from app.services.repository_discovery import (
     expand_query,
     rank_candidates,
     score_analyzability,
+    score_readme_quality,
     score_relevance,
 )
 from app.services.github_service import GitHubService
@@ -110,6 +111,29 @@ def test_missing_github_metadata_is_scored_defensively():
     assert rank_candidates("cloud storage", [{}, None]) == []
 
 
+def test_readme_quality_is_unknown_without_inspected_content_and_rewards_useful_content():
+    candidate = {"name": "file-manager", "description": "A file manager and sharing application."}
+    assert score_readme_quality(None, candidate) is None
+    terse = score_readme_quality("# File Manager\nA file manager.", candidate)
+    useful = score_readme_quality("""# File Manager
+
+## Overview
+Manage and share files.
+
+## Installation
+Run npm install and npm run dev.
+
+## Usage
+```sh
+npm run upload
+```
+
+## Architecture
+The storage service handles uploads and downloads.
+""", candidate, ["src/storage/upload.ts"])
+    assert useful is not None and terse is not None and useful > terse
+
+
 def test_github_search_uses_broad_candidates_and_ranks_with_tree_evidence(monkeypatch):
     relevant_without_sources = {
         "id": 1,
@@ -189,6 +213,7 @@ def test_github_search_uses_broad_candidates_and_ranks_with_tree_evidence(monkey
             ]
         ),
     )
+    monkeypatch.setattr(service, "_fetch_candidate_readme", lambda repo: None)
 
     results = service.search_repositories("file manager", limit=10)
 
@@ -250,6 +275,33 @@ def test_ready_repository_does_not_override_relevance_outside_cohort(monkeypatch
     ]
     ranked = rank_candidates("query", candidates)
     assert ranked[0]["full_name"] == "a/topical"
+
+
+def test_informative_inspected_readme_breaks_readiness_tie_but_stars_do_not():
+    paths = ["README.md", "package.json", "src/main.ts", "src/routes.ts", "src/services/storage.ts", "tests/app.test.ts"]
+    terse = {
+        "name": "file manager", "full_name": "a/terse", "description": "File manager", "topics": ["file-manager"],
+        "stargazers_count": 2_000_000, "_repo_paths": paths, "_tree_inspection_state": "inspected",
+        "_readme_present": True, "_readme_text": "# File Manager\nA tool.",
+    }
+    informative = {
+        **terse, "full_name": "b/informative", "stargazers_count": 0,
+        "_readme_text": """# File Manager
+## Overview
+Manage and share files.
+## Installation
+Run npm install and npm run dev.
+## Usage
+```sh
+npm run upload
+```
+## Architecture
+The storage service handles uploads.
+""",
+    }
+    ranked = rank_candidates("file manager", [terse, informative])
+    assert ranked[0]["full_name"] == "b/informative"
+    assert ranked[0]["readme_quality_score"] > ranked[1]["readme_quality_score"]
 
 
 def test_tree_inspection_failure_is_distinct_from_an_empty_repository(monkeypatch):

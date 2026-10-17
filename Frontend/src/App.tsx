@@ -14,6 +14,7 @@ import {
   searchRepositories,
 } from './services/api';
 import { getDevelopmentApiBaseOverride } from './services/api-base';
+import { getSavedRepositoryAnalysisUrl, normalizeGitHubRepoInput } from './services/github-repo-url';
 import { SimilarRepo, Repository } from './types';
 import {
   Star,
@@ -100,46 +101,6 @@ interface DemoStartResponse {
   state: string;
   public_ip: string | null;
 }
-
-const normalizeGitHubRepoInput = (value: string) => {
-  const cleaned = value.trim();
-
-  if (!cleaned) return '';
-
-  const compactRepoPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-  if (compactRepoPattern.test(cleaned)) {
-    return `https://github.com/${cleaned.replace(/\.git$/i, '')}`;
-  }
-
-  const sshRepoPattern = /^git@github\.com:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\.git)?$/i;
-  const sshMatch = cleaned.match(sshRepoPattern);
-  if (sshMatch) {
-    return `https://github.com/${sshMatch[1]}`;
-  }
-
-  try {
-    const parsed = new URL(cleaned);
-    const hostname = parsed.hostname.toLowerCase();
-    if (
-      hostname === 'github.com' ||
-      hostname === 'www.github.com'
-    ) {
-      const pathParts = parsed.pathname
-        .replace(/^\/+|\/+$/g, '')
-        .replace(/\.git$/i, '')
-        .split('/')
-        .filter(Boolean);
-
-      if (pathParts.length >= 2) {
-        return `https://github.com/${pathParts[0]}/${pathParts[1]}`;
-      }
-    }
-  } catch {
-    // Ignore invalid URL format.
-  }
-
-  return cleaned;
-};
 
 const getRepoFullName = (repoUrl: string) => {
   const cleaned = repoUrl.trim();
@@ -1490,6 +1451,9 @@ export default function App() {
             fullName:
               repo.fullName,
 
+            url:
+              repo.url,
+
             description:
               repo.description,
 
@@ -2038,7 +2002,7 @@ export default function App() {
                           <button
                             onClick={() =>
                               handleAnalyze(
-                                repo.fullName
+                                getSavedRepositoryAnalysisUrl(repo)
                               )
                             }
                             disabled={!analysisApiAvailable}

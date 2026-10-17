@@ -167,11 +167,11 @@ def score_relevance(query: str, candidate: dict[str, Any]) -> float:
         description_terms = set(description.split())
         score += min(15, 5 * len(set(query_terms) & description_terms))
 
-    # Popularity only breaks close relevance ties; it cannot compensate for
-    # missing topic/name/description evidence.
+    # Popularity is a small tie-breaker only; it cannot compensate for missing
+    # topic/name/description evidence.
     stars = candidate.get("stargazers_count", candidate.get("stars", 0))
     if isinstance(stars, (int, float)) and stars > 0:
-        score += min(2.0, math.log10(stars + 1) * 0.5)
+        score += min(0.5, math.log10(stars + 1) * 0.125)
 
     return round(min(100.0, score), 2)
 
@@ -249,6 +249,43 @@ def score_analyzability(
         if isinstance(selected, (int, float)) and selected > 0: score += min(8, int(selected) * 2)
         if isinstance(routes, (int, float)) and routes > 0: score += min(8, int(routes) * 2)
     return float(min(100, score))
+
+
+def score_readme_quality(
+    readme_text: str | None,
+    candidate: dict[str, Any] | None = None,
+    paths: list[str] | None = None,
+) -> float | None:
+    """Estimate README usefulness only when content was actually inspected."""
+    if not isinstance(readme_text, str) or not readme_text.strip():
+        return None
+
+    text = readme_text.casefold()
+    words = set(re.findall(r"[a-z0-9]{3,}", text))
+    word_count = len(re.findall(r"\b[a-z0-9]+\b", text))
+    score = float(int(word_count >= 40) + int(word_count >= 120))
+    section_groups = (
+        ("overview", "about", "what it does", "introduction", "purpose"),
+        ("install", "installation", "setup", "getting started", "requirements"),
+        ("usage", "quick start", "examples", "features", "capabilities"),
+        ("architecture", "design", "how it works", "development", "configuration"),
+    )
+    score += sum(1.5 for group in section_groups if any(term in text for term in group))
+    score += float(bool(re.search(r"```|\$\s+[a-z]|npm (?:run|install)|pip install|docker compose", text)))
+
+    candidate = candidate or {}
+    anchors = set(re.findall(
+        r"[a-z0-9]{4,}", " ".join(str(candidate.get(key) or "") for key in ("name", "full_name", "description")),
+    ))
+    anchors.update(
+        token
+        for path in (paths or [])
+        for token in re.findall(r"[a-z0-9]{4,}", PurePosixPath(path).stem.casefold())
+    )
+    if anchors:
+        overlap = len(anchors & words) / max(1, min(len(anchors), 12))
+        score += 1.5 * min(1.0, overlap)
+    return round(min(10.0, score), 2)
 
 
 def build_analysis_evidence(
@@ -385,6 +422,9 @@ def rank_candidates(
             ranking_score = relevance
         candidate["relevance_score"] = relevance
         candidate["analyzability_score"] = analysis_score
+        candidate["readme_quality_score"] = score_readme_quality(
+            candidate.get("_readme_text"), candidate, paths if isinstance(paths, list) else []
+        )
         candidate["ranking_score"] = ranking_score
         candidate["tree_inspection_state"] = state
         candidate["tree_truncated"] = truncated
@@ -415,7 +455,11 @@ def rank_candidates(
                     # Lift a ready candidate just above the best-relevance
                     # baseline, while leaving all out-of-cohort candidates
                     # relevance-ranked.
-                    item["ranking_adjustment"] = round(delta + 0.01, 2)
+                    quality_tiebreak = (
+                        float(item.get("analyzability_score") or 0) / 1000
+                        + float(item.get("readme_quality_score") or 0) / 100
+                    )
+                    item["ranking_adjustment"] = round(delta + 0.01 + quality_tiebreak, 2)
                 else:
                     item["ranking_adjustment"] = 0.0
                 item["ranking_score"] = round(item["relevance_score"] + item["ranking_adjustment"], 2)
@@ -430,6 +474,8 @@ def rank_candidates(
             -(item["ranking_score"] if item["ranking_score"] is not None else item["relevance_score"]),
             -item["relevance_score"],
             0 if item["evidence_readiness"] == "ready" else 1,
+            -(item["analyzability_score"] if item["analyzability_score"] is not None else -1),
+            -(item["readme_quality_score"] if item["readme_quality_score"] is not None else -1),
             0 if item["tree_inspection_state"] == "inspected" and not item["tree_truncated"] else 1 if item["tree_inspection_state"] == "inspected" else 2,
             -_safe_popularity(item.get("stargazers_count")),
             str(item.get("full_name") or item.get("name") or "").casefold(),

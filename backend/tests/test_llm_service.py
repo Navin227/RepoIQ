@@ -598,6 +598,48 @@ def test_gemma_repository_map_supplies_verified_module_components_without_cross_
     assert "No Evidence" not in modules
 
 
+def test_evidence_backed_module_without_file_mapping_is_retained_without_invented_components():
+    service = LLMService()
+    result = service._normalize_analysis({
+        "overview": "Order management.",
+        "claims": [{
+            "text": "Order reconciliation resolves duplicate order records.",
+            "category": "module", "target_name": "Order reconciliation",
+            "evidence": [{"path": "src/reconcile.py", "start_line": 1, "end_line": 4}],
+        }],
+        "modules": [{
+            "name": "Order reconciliation",
+            "purpose": "Resolves duplicate order records.",
+            "components": ["README.md", "docs/reconcile.md", "src/missing.py"],
+        }],
+        "architecture": {},
+    }, {"context_bundle": {"coverage_manifest": {"files": [
+        {"path": "src/reconcile.py", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 4}]},
+    ]}}})
+
+    assert len(result["modules"]) == 1
+    assert result["modules"][0]["components"] == []
+    assert result["modules"][0]["evidence"] == []
+
+
+def test_architecture_normalization_drops_placeholders_and_generic_components():
+    normalized = LLMService()._normalize_architecture({
+        "summary": "Unknown",
+        "architecture_type": "N/A",
+        "flow": ["Unknown", "API validates order input"],
+        "components": [
+            {"name": "Response", "responsibility": "Performs a specific runtime responsibility inferred from repository architecture evidence"},
+            {"name": "Order API", "responsibility": "Validates order input", "input": "Unknown", "output": "Order record"},
+        ],
+        "deployment": "Not available",
+    })
+    assert normalized["summary"] == ""
+    assert normalized["architecture_type"] == ""
+    assert normalized["flow"] == ["API validates order input"]
+    assert normalized["components"] == [{"name": "Order API", "responsibility": "Validates order input", "output": "Order record"}]
+    assert normalized["deployment"] == ""
+
+
 def test_grok_input_budget_records_omissions_and_removes_duplicate_tree():
     bundle = {
         "coverage_manifest": {"files": [

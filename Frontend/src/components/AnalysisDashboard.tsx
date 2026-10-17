@@ -54,6 +54,13 @@ function normalizeFileTree(value: unknown): FileTreeNode[] {
 
 const UNKNOWN_EVIDENCE = 'Unable to confidently determine from repository evidence.';
 
+function getOptionalEvidenceText(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  if (!text || /^(unknown|n\/a|not available|unable to confidently determine from repository evidence\.?|performs a specific runtime responsibility inferred from repository architecture evidence\.?)$/i.test(text)) return '';
+  return text;
+}
+
 interface CoreModule {
   name: string;
   iconName: string;
@@ -66,7 +73,7 @@ interface CoreModule {
 interface InteractionLink {
   from: string;
   to: string;
-  flowDesc: string;
+  flowDesc?: string;
 }
 
 interface NonTechnicalOverview {
@@ -120,24 +127,23 @@ function getNonTechnicalOverview(repo: Repository): NonTechnicalOverview {
     ).map((module) => ({
       name: module.name,
       iconName: 'code',
-      purpose: module.purpose || module.description || UNKNOWN_EVIDENCE,
-      responsibility: getStringList(module.capabilities).join('; ') || UNKNOWN_EVIDENCE,
+      purpose: module.purpose || module.description || '',
+      responsibility: getStringList(module.capabilities).join('; '),
       keyFilesFolders: getStringList(module.evidence).length > 0
         ? getStringList(module.evidence)
         : getStringList(module.components),
       dependencies: getStringList(module.connected_modules),
     })),
     dependencyMap: {
-      description: getEvidenceText(repo.architecture?.architecture_summary) !== UNKNOWN_EVIDENCE
-        ? getEvidenceText(repo.architecture?.architecture_summary)
-        : getEvidenceText(repo.architecture?.summary),
+      description: getOptionalEvidenceText(repo.architecture?.architecture_summary)
+        || getOptionalEvidenceText(repo.architecture?.summary),
       interactions: modules.flatMap((module) =>
         getStringList(module.connected_modules)
           .filter((target) => moduleNames.has(target.toLocaleLowerCase()))
           .map((target) => ({
             from: module.name,
             to: modules.find((candidate) => candidate.name.toLocaleLowerCase() === target.toLocaleLowerCase())?.name || target,
-            flowDesc: UNKNOWN_EVIDENCE,
+            flowDesc: '',
           }))
       ),
     },
@@ -307,33 +313,34 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
   const overviewData = getNonTechnicalOverview(repo);
   const headerDescription = getEvidenceText(repo.description);
   const architectureData = repo.architecture;
-  const architecturePrimarySummary = getEvidenceText(architectureData?.architecture_summary);
-  const architectureSummary = architecturePrimarySummary !== UNKNOWN_EVIDENCE
-    ? architecturePrimarySummary
-    : getEvidenceText(architectureData?.summary);
-  const architectureType = getEvidenceText(architectureData?.architecture_type);
-  const architectureFlow = getStringList(architectureData?.flow).filter((step) => step !== UNKNOWN_EVIDENCE);
-  const requestLifecycle = getStringList(architectureData?.request_lifecycle).filter((step) => step !== UNKNOWN_EVIDENCE);
+  const architecturePrimarySummary = getOptionalEvidenceText(architectureData?.architecture_summary);
+  const architectureSummary = architecturePrimarySummary || getOptionalEvidenceText(architectureData?.summary);
+  const architectureType = getOptionalEvidenceText(architectureData?.architecture_type);
+  const architectureFlow = getStringList(architectureData?.flow).map(getOptionalEvidenceText).filter(Boolean);
+  const requestLifecycle = getStringList(architectureData?.request_lifecycle).map(getOptionalEvidenceText).filter(Boolean);
   const componentCards: ArchitectureComponent[] = (Array.isArray(architectureData?.components) ? architectureData.components : [])
     .filter((component) =>
       Boolean(component) &&
       typeof component.name === 'string' &&
       component.name.trim().length > 0 &&
-      typeof component.responsibility === 'string'
+      typeof component.responsibility === 'string' &&
+      getOptionalEvidenceText(component.responsibility).length > 0 &&
+      !['response', 'request', 'result', 'data', 'component', 'module', 'service', 'system'].includes(component.name.trim().toLowerCase())
     )
     .map((component) => ({
       name: component.name,
-      responsibility: component.responsibility,
-      connected_to: getStringList(component.connected_to),
-      input: getEvidenceText(component.input),
-      output: getEvidenceText(component.output),
-      communicates_with: getStringList(component.communicates_with),
+      responsibility: getOptionalEvidenceText(component.responsibility),
+      connected_to: getStringList(component.connected_to).filter((value) => getOptionalEvidenceText(value)),
+      input: getOptionalEvidenceText(component.input),
+      output: getOptionalEvidenceText(component.output),
+      communicates_with: getStringList(component.communicates_with).filter((value) => getOptionalEvidenceText(value)),
+      connection_evidence_status: component.connection_evidence_status,
     }));
   const communicationPatterns = getStringList(architectureData?.communication)
-    .filter((pattern) => pattern !== UNKNOWN_EVIDENCE);
-  const syncPath = getStringList(architectureData?.sync_path).filter((step) => step !== UNKNOWN_EVIDENCE);
-  const asyncPath = getStringList(architectureData?.async_path).filter((step) => step !== UNKNOWN_EVIDENCE);
-  const deploymentSummary = getEvidenceText(architectureData?.deployment);
+    .map(getOptionalEvidenceText).filter(Boolean);
+  const syncPath = getStringList(architectureData?.sync_path).map(getOptionalEvidenceText).filter(Boolean);
+  const asyncPath = getStringList(architectureData?.async_path).map(getOptionalEvidenceText).filter(Boolean);
+  const deploymentSummary = getOptionalEvidenceText(architectureData?.deployment);
   const rawExecutiveOverview = repo.overview?.executiveOverview;
   const genericNarrativePatterns = [
     /brings? the project files/i,
@@ -1264,12 +1271,12 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="space-y-2">
                       <span className="text-xs font-mono text-gray-500 uppercase tracking-widest block">Architecture Summary</span>
-                      <p className="text-sm text-gray-300 leading-relaxed">{architectureSummary}</p>
+                      {architectureSummary && <p className="text-sm text-gray-300 leading-relaxed">{architectureSummary}</p>}
                     </div>
-                    <div className="rounded-xl border border-[#8B5CF6]/20 bg-[#8B5CF6]/10 px-4 py-3 w-full max-w-xs">
+                    {architectureType && <div className="rounded-xl border border-[#8B5CF6]/20 bg-[#8B5CF6]/10 px-4 py-3 w-full max-w-xs">
                       <div className="text-[10px] font-mono uppercase tracking-widest text-[#c4b5fd]">Inferred Type</div>
                       <div className="mt-1 text-sm font-semibold text-white">{architectureType}</div>
-                    </div>
+                    </div>}
                   </div>
 
                 <div className="mt-8 pt-4 border-t border-white/[0.06]">
@@ -1284,20 +1291,18 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                             </div>
                             <span className="text-xs font-bold text-white">{component.name}</span>
                           </div>
-                          <p className="text-xs text-gray-300 leading-relaxed">{component.responsibility || UNKNOWN_EVIDENCE}</p>
-                          <div className="mt-4 pt-3 border-t border-white/[0.04]">
+                          {component.responsibility && <p className="text-xs text-gray-300 leading-relaxed">{component.responsibility}</p>}
+                          {component.connected_to.length > 0 && <div className="mt-4 pt-3 border-t border-white/[0.04]">
                             <span className="text-[9px] font-mono uppercase tracking-wider text-gray-500">Connected Components</span>
                             <p className="mt-1 text-[11px] text-gray-400 break-words">
-                              {component.connected_to.length > 0 ? component.connected_to.join(', ') : UNKNOWN_EVIDENCE}
+                              {component.connected_to.join(', ')}
                             </p>
-                          </div>
+                          </div>}
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-white/[0.08] bg-white/[0.01] p-6 text-sm text-gray-400 text-center">
-                      {UNKNOWN_EVIDENCE}
-                    </div>
+                    <div className="rounded-2xl border border-dashed border-white/[0.08] bg-white/[0.01] p-6 text-sm text-gray-400 text-center">No architecture components were supported by inspected repository evidence.</div>
                   )}
                 </div>
                 </div>
@@ -1317,7 +1322,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         </div>
                       </div>
                     )) : (
-                      <p className="text-sm text-gray-400 text-center">{UNKNOWN_EVIDENCE}</p>
+                      <p className="text-sm text-gray-400 text-center">No request flow was supported by inspected repository evidence.</p>
                     )}
                     <div className="pt-4 border-t border-white/[0.05] space-y-3">
                       <h5 className="text-[10px] font-mono uppercase tracking-widest text-gray-500">Request Lifecycle</h5>
@@ -1326,7 +1331,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                           {lifecycleStep}
                         </div>
                       )) : (
-                        <p className="text-sm text-gray-400">{UNKNOWN_EVIDENCE}</p>
+                        <p className="text-sm text-gray-400">No lifecycle details were supported by inspected repository evidence.</p>
                       )}
                     </div>
                   </div>
@@ -1342,30 +1347,26 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         <div className="mt-4 space-y-3 text-xs text-gray-300 font-sans">
                           <div>
                             <div className="font-semibold text-white text-[10px] uppercase tracking-wider">Purpose</div>
-                            <div className="mt-1 leading-snug">{c.responsibility || UNKNOWN_EVIDENCE}</div>
+                            {c.responsibility && <div className="mt-1 leading-snug">{c.responsibility}</div>}
                           </div>
-                          <div>
+                          {c.input && <div>
                             <div className="font-semibold text-white text-[10px] uppercase tracking-wider">Input</div>
-                            <div className="mt-1 leading-snug">{c.input || UNKNOWN_EVIDENCE}</div>
-                          </div>
-                          <div>
+                            <div className="mt-1 leading-snug">{c.input}</div>
+                          </div>}
+                          {c.output && <div>
                             <div className="font-semibold text-white text-[10px] uppercase tracking-wider">Output</div>
-                            <div className="mt-1 leading-snug">{c.output || UNKNOWN_EVIDENCE}</div>
-                          </div>
-                          <div>
+                            <div className="mt-1 leading-snug">{c.output}</div>
+                          </div>}
+                          {(c.communicates_with?.length || c.connected_to.length) ? <div>
                             <div className="font-semibold text-white text-[10px] uppercase tracking-wider">Communicates With</div>
                             <div className="mt-1 leading-snug text-[#c4b5fd]">
-                              {c.communicates_with?.length
-                                ? c.communicates_with.join(', ')
-                                : c.connected_to.length > 0
-                                  ? c.connected_to.join(', ')
-                                  : UNKNOWN_EVIDENCE}
+                              {c.communicates_with?.length ? c.communicates_with.join(', ') : c.connected_to.join(', ')}
                             </div>
-                          </div>
+                          </div> : null}
                         </div>
                       </div>
                     )) : (
-                      <p className="sm:col-span-2 lg:col-span-4 text-sm text-gray-400 text-center">{UNKNOWN_EVIDENCE}</p>
+                      <p className="sm:col-span-2 lg:col-span-4 text-sm text-gray-400 text-center">No modules were supported by inspected repository evidence.</p>
                     )}
                   </div>
                 </div>
@@ -1378,7 +1379,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         <div key={`${step}-${index}`} className="rounded-xl border border-white/[0.06] bg-black/30 px-4 py-3">
                           {step}
                         </div>
-                      )) : <p>{UNKNOWN_EVIDENCE}</p>}
+                      )) : <p>No synchronous path was supported by inspected repository evidence.</p>}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-white/[0.08] bg-white/[0.01] p-5">
@@ -1388,7 +1389,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                         <div key={`${step}-${index}`} className="rounded-xl border border-white/[0.06] bg-black/30 px-4 py-3">
                           {step}
                         </div>
-                      )) : <p>{UNKNOWN_EVIDENCE}</p>}
+                      )) : <p>No asynchronous path was supported by inspected repository evidence.</p>}
                     </div>
                   </div>
                 </div>
@@ -1402,14 +1403,14 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                           {item}
                         </div>
                       )) : (
-                        <p className="text-sm text-gray-400">{UNKNOWN_EVIDENCE}</p>
+                        <p className="text-sm text-gray-400">No communication patterns were supported by inspected repository evidence.</p>
                       )}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-white/[0.08] bg-white/[0.01] p-5">
                     <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">Deployment Overview</h4>
                     <div className="rounded-xl border border-[#8B5CF6]/20 bg-[#8B5CF6]/10 px-4 py-4 text-sm text-gray-200">
-                      {deploymentSummary}
+                      {deploymentSummary || 'No deployment details were supported by inspected repository evidence.'}
                     </div>
                   </div>
                 </div>
