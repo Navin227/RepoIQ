@@ -40,6 +40,7 @@ def _is_allowed_route(method: str, path: str) -> bool:
         return True
     return method == "GET" and (
         path == "/api/repositories"
+        or path == "/api/repositories/history"
         or re.fullmatch(r"/api/repositories/[0-9]+", path) is not None
     )
 

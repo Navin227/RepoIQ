@@ -922,7 +922,22 @@ class LLMService:
             raw_components = self._normalize_string_list(
                 self._normalize_string_list(item.get("components"))
                 + self._normalize_string_list(item.get("evidence"))
-            )[:12]
+            )
+            repository_map = (payload.get("context_bundle") or {}).get("repository_map") or {}
+            if isinstance(repository_map, dict):
+                module_tokens = self._use_case_tokens(name + " " + purpose)
+                gemma_modules = repository_map.get("modules", [])
+                for gemma_module in gemma_modules if isinstance(gemma_modules, list) else []:
+                    if not isinstance(gemma_module, dict):
+                        continue
+                    gemma_tokens = self._use_case_tokens(" ".join(str(gemma_module.get(k) or "") for k in ("name", "purpose", "description", "summary")))
+                    if not module_tokens.intersection(gemma_tokens):
+                        continue
+                    for key in ("components", "files", "evidence_paths", "evidence_references", "evidence", "source_files", "implementation_files"):
+                        value = gemma_module.get(key, [])
+                        values = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+                        raw_components.extend(str(candidate.get("path")) if isinstance(candidate, dict) and candidate.get("path") else candidate for candidate in values if isinstance(candidate, str) or isinstance(candidate, dict) and candidate.get("path"))
+            raw_components = list(dict.fromkeys(raw_components))
             supported_components = []
 
             for component in raw_components:
@@ -934,7 +949,7 @@ class LLMService:
                 if normalized_path.casefold() in known_paths and self._is_functional_module_path(normalized_path, name):
                     supported_components.append(component.strip())
 
-            supported_components = list(dict.fromkeys(supported_components))
+            supported_components = list(dict.fromkeys(supported_components))[:12]
             if not supported_components:
                 continue
 
@@ -1234,9 +1249,16 @@ class LLMService:
             ".svelte", ".swift", ".scala", ".ex", ".exs", ".dart", ".c",
             ".cc", ".hpp", ".sh",
         }
-        if suffix in source_suffixes:
-            return True
         infrastructure_module = bool(re.search(r"infra|deploy|terraform|cloud|gateway|operations", module_name, re.I))
+        infrastructure_path = suffix in {".tf", ".tfvars"} or normalized.startswith(("infra/", "infrastructure/", "terraform/", "k8s/", "kubernetes/", "helm/"))
+        if infrastructure_path:
+            return infrastructure_module and (
+                suffix in source_suffixes | {".tf", ".tfvars", ".yaml", ".yml", ".json"}
+                or name in {"dockerfile", "makefile", "serverless.yml", "serverless.yaml"}
+                or normalized.startswith((".github/workflows/", "k8s/", "kubernetes/", "helm/"))
+            )
+        if suffix in source_suffixes:
+            return not infrastructure_module
         return infrastructure_module and (
             suffix in {".tf", ".tfvars", ".yaml", ".yml", ".json"}
             or name in {"dockerfile", "makefile", "serverless.yml", "serverless.yaml"}
@@ -1252,6 +1274,26 @@ class LLMService:
             "handles project functionality", "provides project functionality",
             "performs core tasks", "supports core functionality",
         } or text in {UNKNOWN.casefold(), "unknown", "n/a"}
+
+    @staticmethod
+    def _is_generic_use_case(value: str) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "").casefold()).strip(" .!\t\n")
+        patterns = (
+            r"\bone place to complete the workflow described by the project\b",
+            r"\bevaluate whether this project fits .* before adopting it\b",
+            r"\bunderstand the product purpose and visible capabilities\b",
+            r"\bmanage (?:project )?data more efficiently\b",
+            r"\bimprove productivity using this platform\b",
+            r"\buse the application(?:'s|s)? core functionality\b",
+            r"\bcomplete (?:the )?(?:workflow|tasks?) (?:described|supported) by (?:the project|this platform)\b",
+        )
+        return LLMService._is_generic_analysis_text(text) or any(re.search(p, text) for p in patterns)
+
+    @staticmethod
+    def _use_case_tokens(value: str) -> set[str]:
+        words = re.findall(r"[a-z][a-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(value or "")).casefold())
+        stop = {"that", "this", "with", "from", "when", "where", "which", "their", "there", "user", "team", "person", "maintainer", "developer", "using", "used", "into", "before", "after", "project", "application", "workflow", "system", "allows", "allow", "helps", "help", "provides", "support", "supported", "manage", "api", "service", "module", "modules", "infrastructure", "deployment", "deploy", "component", "handler", "route", "routes", "server", "client"}
+        return {word for word in words if len(word) > 2 and word not in stop}
 
     @staticmethod
     def _is_generic_module_name(name: str) -> bool:
@@ -1297,6 +1339,7 @@ class LLMService:
             paragraphs = []
 
         feature_paths = self._feature_evidence_paths(payload)
+        implementation_paths = self._implementation_evidence_paths(payload)
         features = []
         seen_feature_names: set[str] = set()
         raw_features = data.get("user_features", [])
@@ -1338,7 +1381,7 @@ class LLMService:
         use_cases = data.get("typical_use_cases", [])
         if isinstance(use_cases, str):
             use_cases = [use_cases]
-        raw_end_user_cases = data.get("end_user_use_cases", use_cases)
+        raw_end_user_cases = data.get("end_user_use_cases", [])
         if isinstance(raw_end_user_cases, (str, dict)):
             raw_end_user_cases = [raw_end_user_cases]
         end_user_cases = []
@@ -1346,6 +1389,7 @@ class LLMService:
             str(item).strip() for item in use_cases
             if isinstance(item, str) and str(item).strip()
             and not self._is_generic_analysis_text(str(item))
+            and not self._is_generic_use_case(str(item))
         ] if isinstance(use_cases, list) else []
         seen_use_cases: set[str] = set()
         seen_use_case_titles: set[str] = set()
@@ -1361,24 +1405,39 @@ class LLMService:
                         str(reference).strip()
                         for reference in raw_case_evidence if isinstance(reference, str)
                         and (
-                            self._normalize_evidence_path(reference).casefold() in feature_paths
-                            or self._normalize_evidence_path(reference, route=True).casefold() in feature_paths
+                            self._normalize_evidence_path(reference).casefold() in implementation_paths
                         )
                     ] if isinstance(raw_case_evidence, list) else []
                 else:
-                    title = ""
-                    description = str(item or "").strip()
-                    supported_case_evidence = []
+                    continue
                 normalized_description = re.sub(r"\s+", " ", description).casefold()
                 normalized_title = re.sub(r"\s+", " ", title).casefold()
                 if (
                     not description
+                    or not title
+                    or self._is_generic_use_case(title + " " + description)
                     or self._is_generic_analysis_text(description)
                     or (title and self._is_generic_analysis_text(title))
                     or normalized_description in seen_use_cases
                     or (normalized_title and normalized_title in seen_use_case_titles)
-                    or (title and not supported_case_evidence)
+                    or not supported_case_evidence
                 ):
+                    continue
+                path_tokens = set()
+                content_tokens = set()
+                evidence_paths_casefolded = {path.casefold() for path in supported_case_evidence}
+                for reference in supported_case_evidence:
+                    path_tokens.update(self._use_case_tokens(PurePosixPath(reference).stem))
+                context = payload.get("context_bundle")
+                if isinstance(context, dict):
+                    for excerpt in context.get("source_excerpts", []):
+                        if isinstance(excerpt, dict) and self._normalize_evidence_path(excerpt.get("path")).casefold() in evidence_paths_casefolded:
+                            content_tokens.update(self._use_case_tokens(excerpt.get("content", "")))
+                source_details = (payload.get("source_evidence") or {}).get("selected_source_file_details", [])
+                for detail in source_details:
+                    if isinstance(detail, dict) and self._normalize_evidence_path(detail.get("path")).casefold() in evidence_paths_casefolded:
+                        content_tokens.update(self._use_case_tokens(detail.get("content", "")))
+                if not self._use_case_tokens(title + " " + description).intersection(path_tokens | content_tokens):
                     continue
                 seen_use_cases.add(normalized_description)
                 if normalized_title:
@@ -1490,6 +1549,34 @@ class LLMService:
                     self._normalize_evidence_path(readme_path).casefold()
                 )
         return evidence_paths
+
+    def _implementation_evidence_paths(self, payload: Dict[str, Any]) -> set[str]:
+        """Use inspected functional source files, excluding README and route labels."""
+        paths: set[str] = set()
+        context = payload.get("context_bundle")
+        manifest = context.get("coverage_manifest") if isinstance(context, dict) else None
+        if isinstance(manifest, dict):
+            for entry in manifest.get("files", []):
+                if isinstance(entry, dict) and entry.get("grok_supplied_line_ranges"):
+                    path = self._normalize_evidence_path(entry.get("path"))
+                    if path and self._is_functional_module_path(path, "Implementation"):
+                        paths.add(path.casefold())
+            for excerpt in context.get("source_excerpts", []):
+                if isinstance(excerpt, dict) and excerpt.get("path"):
+                    path = self._normalize_evidence_path(excerpt["path"])
+                    if path and self._is_functional_module_path(path, "Implementation"):
+                        paths.add(path.casefold())
+            return paths
+        for detail in (payload.get("source_evidence") or {}).get("selected_source_file_details", []):
+            if isinstance(detail, dict) and detail.get("path"):
+                path = self._normalize_evidence_path(detail["path"])
+                if path and self._is_functional_module_path(path, "Implementation"):
+                    paths.add(path.casefold())
+        for candidate in payload.get("file_tree", []):
+            path = self._normalize_evidence_path(candidate)
+            if path and self._is_functional_module_path(path, "Implementation"):
+                paths.add(path.casefold())
+        return paths
 
 
 

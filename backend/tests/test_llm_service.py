@@ -540,6 +540,64 @@ def test_end_user_use_cases_are_titled_evidence_backed_and_deduplicated():
     }]
 
 
+def test_generic_use_cases_and_typical_use_case_fallback_are_rejected():
+    service = LLMService()
+    payload = {"source_evidence": {"selected_source_file_details": [{"path": "src/orders.py", "role": "service"}]}, "file_tree": ["src/orders.py"]}
+    phrases = [
+        "A person wants one place to complete the workflow described by the project.",
+        "A team wants to evaluate whether this project fits their needs before adopting it.",
+        "A maintainer wants to understand the product purpose and visible capabilities quickly.",
+    ]
+    normalized = service._normalize_executive_overview({"typical_use_cases": phrases}, payload)
+    assert normalized["end_user_use_cases"] == []
+    assert normalized["typical_use_cases"] == []
+    generic = service._normalize_executive_overview({"end_user_use_cases": [
+        {"title": "Order workflows", "description": phrases[0], "evidence": ["src/orders.py"]},
+    ]}, payload)
+    assert generic["end_user_use_cases"] == []
+
+
+def test_use_cases_from_distinct_implementation_evidence_remain_distinct():
+    service = LLMService()
+    cases = [
+        ({"file_tree": ["src/pdf_compressor.py"], "source_evidence": {"selected_source_file_details": [{"path": "src/pdf_compressor.py", "role": "service"}]}},
+         {"title": "Compress a PDF", "description": "Reduce a PDF's file size before sharing it.", "evidence": ["src/pdf_compressor.py"]}),
+        ({"file_tree": ["src/oauth_client.py"], "source_evidence": {"selected_source_file_details": [{"path": "src/oauth_client.py", "role": "service"}]}},
+         {"title": "Refresh an access token", "description": "Request a refreshed OAuth access token when the current token expires.", "evidence": ["src/oauth_client.py"]}),
+    ]
+    outputs = [service._normalize_executive_overview({"end_user_use_cases": [item]}, payload)["end_user_use_cases"] for payload, item in cases]
+    assert outputs[0][0]["title"] == "Compress a PDF"
+    assert outputs[1][0]["title"] == "Refresh an access token"
+    assert outputs[0] != outputs[1]
+
+
+def test_gemma_repository_map_supplies_verified_module_components_without_cross_mapping():
+    service = LLMService()
+    files = [
+        {"path": "src/orders.py", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 8}]},
+        {"path": "infra/deploy.tf", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 8}]},
+        {"path": "package-lock.json", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 8}]},
+        {"path": "src/unrelated.py", "status": "fully_inspected", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 8}]},
+    ]
+    result = service._normalize_analysis({"overview": "Order service and infrastructure.", "modules": [
+        {"name": "Order Service", "purpose": "Applies order rules.", "components": []},
+        {"name": "Infrastructure", "purpose": "Deploys the service.", "components": []},
+        {"name": "Unrelated Module", "purpose": "Handles unrelated logic.", "components": ["missing.py", "src/unrelated.py"]},
+        {"name": "No Evidence", "purpose": "No mapping is available.", "components": ["missing.py"]},
+    ], "architecture": {}}, {"context_bundle": {
+        "coverage_manifest": {"files": files},
+        "repository_map": {"modules": [
+            {"name": "Order Service", "purpose": "Applies order rules", "evidence_paths": ["src/orders.py", "missing.py", "package-lock.json"]},
+            {"name": "Infrastructure", "purpose": "Deploys the service", "components": [{"path": "infra/deploy.tf"}]},
+        ]},
+    }})
+    modules = {item["name"]: item["components"] for item in result["modules"]}
+    assert modules["Order Service"] == ["src/orders.py"]
+    assert modules["Infrastructure"] == ["infra/deploy.tf"]
+    assert modules["Unrelated Module"] == ["src/unrelated.py"]
+    assert "No Evidence" not in modules
+
+
 def test_grok_input_budget_records_omissions_and_removes_duplicate_tree():
     bundle = {
         "coverage_manifest": {"files": [

@@ -567,13 +567,7 @@ Before including a use case, ask:
 
 If yes, reject it and rewrite it using verified functionality, or omit it.
 
-Reject descriptions such as:
-- "A person wants one place to complete the workflow described by the project."
-- "A team wants to evaluate whether this project fits their needs before adopting it."
-- "A maintainer wants to understand the product purpose and visible capabilities quickly."
-- "A user wants to manage data more efficiently."
-- "A user wants to improve productivity using this platform."
-- "A developer wants to use the application's core functionality."
+Reject generic project evaluation, product-understanding, unspecified-workflow, data-management, or productivity scenarios. Reject equivalent paraphrases even if their wording differs.
 
 Equivalent wording is equally invalid. Do not use these templates or generic variations even when the output would otherwise contain fewer items.
 

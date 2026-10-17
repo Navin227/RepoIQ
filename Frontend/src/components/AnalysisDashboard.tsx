@@ -414,9 +414,7 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
       ? cleanNarrative(getEvidenceText(rawExecutiveOverview?.one_line_summary))
       : overviewSummary,
   };
-  const endUserUseCases = executiveOverview.end_user_use_cases?.length
-    ? executiveOverview.end_user_use_cases
-    : executiveOverview.typical_use_cases.map((description) => ({ title: '', description, evidence: [] as string[] }));
+  const endUserUseCases = executiveOverview.end_user_use_cases ?? [];
   const businessModules = (Array.isArray(repo.analysis?.businessModules) ? repo.analysis.businessModules : [])
     .filter((module): module is BusinessModule =>
       Boolean(module) && typeof module.name === 'string' && module.name.trim().length > 0
@@ -642,10 +640,10 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
             </div>
           </div>
 
-          <div>
+          {endUserUseCases.length > 0 && <div>
             <h4 className="text-xs font-mono text-gray-500 uppercase tracking-widest mb-4">End User Use Cases</h4>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {endUserUseCases.length > 0 ? endUserUseCases.slice(0, 6).map((useCase, idx) => (
+              {endUserUseCases.slice(0, 6).map((useCase, idx) => (
                 <div key={`${useCase.title || useCase.description}-${idx}`} className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-5 hover:border-[#8B5CF6]/20 transition-all">
                   <span className="text-[10px] font-mono font-bold text-indigo-400">USE CASE 0{idx + 1}</span>
                   {useCase.title && <h5 className="font-bold text-sm text-white mt-1.5">{useCase.title}</h5>}
@@ -656,9 +654,9 @@ export default function AnalysisDashboard({ repo, isSaved, onSaveToggle, onBackT
                     </p>
                   )}
                 </div>
-              )) : <p className="text-sm text-gray-400 col-span-full">No sufficiently supported end-user workflows were identified.</p>}
+              ))}
             </div>
-          </div>
+          </div>}
 
         </div>
       )}

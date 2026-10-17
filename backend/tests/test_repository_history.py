@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from fastapi.testclient import TestClient
 
-from app.database import Base
+from app.database import Base, get_db
+from app.main import app
 from app.models.analysis_result import AnalysisResult
 from app.models.repository import Repository
 from app.routes.repository import get_repository_history
@@ -74,3 +76,47 @@ def test_history_database_error_returns_retryable_service_error():
     with pytest.raises(HTTPException) as error:
         get_repository_history(offset=0, limit=20, db=BrokenSession())
     assert error.value.status_code == 503
+
+
+def test_exact_history_api_route_returns_saved_analysis_page(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'history-api.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        now = datetime(2026, 10, 17)
+        make_repository(db, "owner/saved", now, now)
+        db.commit()
+
+    def override_db():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/repositories/history?offset=0&limit=20")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["full_name"] == "owner/saved"
+    assert payload["items"][0]["analysis_result"]["overview"] == "Stored overview"
+
+
+def test_exact_history_api_route_returns_503_on_database_error():
+    class BrokenSession:
+        def scalar(self, _query):
+            raise SQLAlchemyError("database unavailable")
+
+    def override_db():
+        yield BrokenSession()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        response = TestClient(app).get("/api/repositories/history?offset=0&limit=20")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Repository history is temporarily unavailable"

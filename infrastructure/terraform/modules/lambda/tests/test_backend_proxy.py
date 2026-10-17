@@ -163,6 +163,26 @@ def test_repository_collection_path_is_forwarded_to_fastapi(monkeypatch) -> None
     assert requests[0].full_url == "http://203.0.113.10:80/api/repositories"
 
 
+def test_repository_history_path_is_forwarded_to_fastapi_with_pagination(monkeypatch) -> None:
+    monkeypatch.setattr(backend_proxy, "ec2", FakeEC2())
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr(backend_proxy, "urlopen", fake_urlopen)
+
+    response = backend_proxy.lambda_handler(
+        _event("GET", "/api/repositories/history", "offset=0&limit=20"),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert requests[0].method == "GET"
+    assert requests[0].full_url == "http://203.0.113.10:80/api/repositories/history?offset=0&limit=20"
+
+
 def test_unknown_route_is_rejected_without_discovering_instance(monkeypatch) -> None:
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError("Unknown paths must not query EC2.")
