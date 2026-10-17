@@ -215,6 +215,10 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     body = response.json()
     assert body["status"] == "success"
     assert body["analysis_run_id"] == "run_gofile_test"
+    assert isinstance(body["analysis_status"], str) and body["analysis_status"]
+    assert isinstance(body["repository_model"], dict)
+    assert isinstance(body["commit_sha"], str) and body["commit_sha"]
+    assert body["repository_model"]["commit_sha"] == body["commit_sha"]
     assert '"event":"analysis_request_received"' in caplog.text
     assert '"event":"repository_model_build_completed"' in caplog.text
     assert '"event":"response_schema_validated"' in caplog.text
@@ -227,6 +231,56 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     assert body["similar_repositories"][0]["fullName"] == "appwrite/appwrite"
     assert "stages" in body["analysis_evidence"]["pipeline_diagnostics"]["output_filtering"]
     assert "validation_diagnostics" in body["repository_model"]
+
+
+def test_analysis_failure_response_keeps_error_contract_and_run_id(monkeypatch, tmp_path):
+    from app.routes import analyze as analyze_route
+
+    def fail_analysis(*_args, **_kwargs):
+        raise RuntimeError("context preparation failed")
+
+    monkeypatch.setattr(analyze_route, "_run_analysis", fail_analysis)
+    response = TestClient(app).post(
+        "/analyze",
+        json={"local_path": str(tmp_path), "analysis_run_id": "run_context_failure"},
+        headers={"X-Analysis-Run-Id": "run_context_failure"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["analysis_status"] == "error"
+    assert body["analysis_run_id"] == "run_context_failure"
+    assert body["error_code"] == "analysis_failed:RuntimeError"
+    assert not body.get("overview")
+    assert not body.get("repository_model")
+
+
+def test_success_response_missing_contract_metadata_becomes_structured_error(monkeypatch, tmp_path):
+    from app.routes import analyze as analyze_route
+    from app.schemas.analyze import AnalyzeResponse
+
+    monkeypatch.setattr(
+        analyze_route,
+        "_run_analysis",
+        lambda *_args, **_kwargs: AnalyzeResponse(
+            status="success", overview="Looks complete but lacks required metadata."
+        ),
+    )
+    response = TestClient(app).post(
+        "/analyze",
+        json={"local_path": str(tmp_path), "analysis_run_id": "run_missing_contract"},
+        headers={"X-Analysis-Run-Id": "run_missing_contract"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["analysis_status"] == "error"
+    assert body["analysis_run_id"] == "run_missing_contract"
+    assert body["error_code"] == "invalid_analysis_response"
+    assert not body.get("repository_model")
+    assert not body.get("commit_sha")
 
 
 def test_repo_scanner_finds_nested_readme(tmp_path):
@@ -596,6 +650,48 @@ def test_gemma_repository_map_supplies_verified_module_components_without_cross_
     assert modules["Infrastructure"] == ["infra/deploy.tf"]
     assert modules["Unrelated Module"] == ["src/unrelated.py"]
     assert "No Evidence" not in modules
+
+
+def test_evidence_backed_module_claim_supplies_a_validated_component_path():
+    service = LLMService()
+    result = service._normalize_analysis({
+        "overview": "Order management.",
+        "claims": [{
+            "text": "Order reconciliation resolves duplicate order records.",
+            "category": "module", "target_name": "Order reconciliation",
+            "evidence": [{"path": "src/reconcile.py", "start_line": 1, "end_line": 4}],
+        }],
+        "modules": [{
+            "name": "Order reconciliation",
+            "purpose": "Resolves duplicate order records.",
+            "components": ["README.md", "docs/reconcile.md", "src/missing.py"],
+        }],
+        "architecture": {},
+    }, {"context_bundle": {"coverage_manifest": {"files": [
+        {"path": "src/reconcile.py", "grok_supplied_line_ranges": [{"start_line": 1, "end_line": 4}]},
+    ]}}})
+
+    assert len(result["modules"]) == 1
+    assert result["modules"][0]["components"] == ["src/reconcile.py"]
+    assert result["modules"][0]["evidence"] == ["src/reconcile.py"]
+
+
+def test_architecture_normalization_drops_placeholders_and_generic_components():
+    normalized = LLMService()._normalize_architecture({
+        "summary": "Unknown",
+        "architecture_type": "N/A",
+        "flow": ["Unknown", "API validates order input"],
+        "components": [
+            {"name": "Response", "responsibility": "Performs a specific runtime responsibility inferred from repository architecture evidence"},
+            {"name": "Order API", "responsibility": "Validates order input", "input": "Unknown", "output": "Order record"},
+        ],
+        "deployment": "Not available",
+    })
+    assert normalized["summary"] == ""
+    assert normalized["architecture_type"] == ""
+    assert normalized["flow"] == ["API validates order input"]
+    assert normalized["components"] == [{"name": "Order API", "responsibility": "Validates order input", "output": "Order record"}]
+    assert normalized["deployment"] == ""
 
 
 def test_grok_input_budget_records_omissions_and_removes_duplicate_tree():

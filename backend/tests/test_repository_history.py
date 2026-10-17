@@ -29,7 +29,8 @@ def make_repository(db: Session, name: str, created_at: datetime, analysis_at: d
         db.add(AnalysisResult(
             repository_id=repository.id,
             stack={}, overview="Stored overview", modules=[], architecture_summary="",
-            similar_repositories=[], created_at=analysis_at,
+            similar_repositories=[], executive_overview={"one_line_summary": "Saved summary"},
+            analysis_status="complete", commit_sha="abc123", created_at=analysis_at,
         ))
     db.flush()
     return repository
@@ -101,7 +102,15 @@ def test_exact_history_api_route_returns_saved_analysis_page(tmp_path):
     payload = response.json()
     assert payload["total"] == 1
     assert payload["items"][0]["full_name"] == "owner/saved"
-    assert payload["items"][0]["analysis_result"]["overview"] == "Stored overview"
+    item = payload["items"][0]
+    assert item["github_url"] == "https://github.com/owner/saved"
+    assert item["analysis_result"]["overview"] == "Stored overview"
+    assert item["analysis_result"]["created_at"] == "2026-10-17T00:00:00"
+    assert item["analysis_result"]["analysis_status"] == "complete"
+    assert item["analysis_result"]["commit_sha"] == "abc123"
+    assert item["analysis_result"]["executive_overview"] == {
+        "one_line_summary": "Saved summary"
+    }
 
 
 def test_exact_history_api_route_returns_503_on_database_error():

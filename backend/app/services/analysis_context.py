@@ -372,11 +372,32 @@ def prepare_context(metadata: dict[str, Any], scan: dict[str, Any], repo_path: s
     key = settings.openrouter_api_key
     if not key: raise ContextPreparationError("OPENROUTER_API_KEY is not configured", "gemma_provider_failure")
     if not batches: raise ContextPreparationError("Repository has no readable files within the supported context policy", "insufficient_repository_coverage")
+    detected_stack = base_payload.get("detected_technology_stack", {})
+    stack_hints = []
+    if isinstance(detected_stack, dict):
+        categories = detected_stack.get("categories", {})
+        if isinstance(categories, dict):
+            for category, detections in categories.items():
+                if not isinstance(detections, list):
+                    continue
+                for detection in detections:
+                    if not isinstance(detection, dict) or not detection.get("name"):
+                        continue
+                    stack_hints.append({
+                        "category": str(category),
+                        "name": str(detection["name"])[:120],
+                        "source": str(detection.get("source") or "")[:240],
+                        "evidence": str(detection.get("evidence") or "")[:240],
+                    })
+                    if len(stack_hints) >= 40:
+                        break
+                if len(stack_hints) >= 40:
+                    break
     findings: list[dict[str, Any]] = []
     for index, batch in enumerate(batches):
         batch_paths = {item["path"] for item in batch}
         evidence = [{"path": item["path"], "roles": item["roles"], "imports": item["relationships"], "important_to_execution_path": item["important_to_execution_path"], "ranges": [{k: e[k] for k in ("start_line", "end_line", "content")} for e in excerpts if e["path"] == item["path"]]} for item in batch]
-        prompt = "Analyze only supplied code and exact source ranges. Return JSON keys purpose, subsystems, entry_points, modules, relationships, integrations, data_flows, important_dependencies, uncertainties, conflicts, evidence_paths, evidence_references. Every finding must include exact evidence path and line ranges or a supporting excerpt. Never cite a path or line outside supplied ranges.\n" + json.dumps({"repository": metadata.get("full_name") or metadata.get("name"), "commit_sha": commit_sha, "batch": index + 1, "total_batches": len(batches), "files": evidence}, ensure_ascii=False)
+        prompt = "Analyze only supplied code and exact source ranges. Return JSON keys purpose, subsystems, entry_points, modules, relationships, integrations, data_flows, important_dependencies, uncertainties, conflicts, evidence_paths, evidence_references. Every finding must include exact evidence path and line ranges or a supporting excerpt. Never cite a path or line outside supplied ranges. Use the detected technology stack only to disambiguate implementation responsibilities; it is not proof that a particular file implements a module. Map modules to exact supplied source files based on their code and interactions, and keep infrastructure configuration separate from application modules.\n" + json.dumps({"repository": metadata.get("full_name") or metadata.get("name"), "commit_sha": commit_sha, "batch": index + 1, "total_batches": len(batches), "technology_stack_hints": stack_hints, "files": evidence}, ensure_ascii=False)
         try:
             raw = _chat(key, settings.openrouter_model, [{"role": "system", "content": "You prepare concise, source-grounded repository context for a second analysis model. Return valid JSON only. Use the supplied file paths, exact line ranges, detected roles, imports, symbols, routes and configuration as evidence. Identify real module boundaries and only direct relationships supported by imports or explicit interactions. Exclude generated, vendored and dependency files from functional findings. Keep uncertainty explicit, preserve exact evidence references, and prefer fewer accurate findings over generic summaries. Never invent paths, line ranges, capabilities or architecture edges."}, {"role": "user", "content": prompt}])
         except Exception as exc:

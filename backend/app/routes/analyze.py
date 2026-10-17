@@ -242,6 +242,8 @@ def _claim_supports_label(label: str, claims: list) -> bool:
 def _filter_architecture(
     architecture: Any,
     claims: list,
+    verified_relationships: set[tuple[str, str]] | None = None,
+    module_connection_status: dict[str, str] | None = None,
 ) -> dict:
     """
     Conservatively filter architecture components and steps.
@@ -262,22 +264,25 @@ def _filter_architecture(
 
     if not usable_architecture_claims:
         return {
-            "architecture_summary": UNKNOWN_EVIDENCE_MESSAGE,
-            "summary": UNKNOWN_EVIDENCE_MESSAGE,
-            "architecture_type": "unknown",
+            "architecture_summary": "",
+            "summary": "",
+            "architecture_type": "",
             "flow": [],
             "request_lifecycle": [],
             "components": [],
             "communication": [],
-            "deployment": "unknown",
+            "deployment": "",
         }
 
     filtered = dict(source)
     summary = str(source.get("architecture_summary") or source.get("summary") or "").strip()
     if summary:
-        supported_summary = _filter_narrative_sentences(summary, usable_architecture_claims)
-        filtered["architecture_summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
-        filtered["summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
+        supported_summary = _filter_architecture_narrative(summary, usable_architecture_claims)
+        filtered["architecture_summary"] = _useful_architecture_text(supported_summary)
+        filtered["summary"] = _useful_architecture_text(supported_summary)
+    else:
+        filtered["architecture_summary"] = ""
+        filtered["summary"] = ""
 
     # Component-level validation: do not keep every component merely because
     # another architecture claim passed validation.
@@ -298,15 +303,67 @@ def _filter_architecture(
         else:
             continue
 
-        if not name or not _claim_supports_label(name, usable_architecture_claims):
+        if (
+            not name
+            or name.casefold() in {"response", "request", "result", "data", "component", "module", "service", "system"}
+            or not _claim_supports_label(name, usable_architecture_claims)
+        ):
+            continue
+
+        responsibility = _useful_architecture_text(component_data.get("responsibility"))
+        responsibility = _filter_architecture_narrative(responsibility, usable_architecture_claims)
+        if not responsibility or _is_generic_architecture_text(responsibility):
             continue
 
         key = _normalise_text(name)
         if key in seen_components:
             continue
         seen_components.add(key)
-        components.append(component_data)
+        normalized_component = {"name": name, "responsibility": responsibility}
+        for field in ("input", "output"):
+            value = _useful_architecture_text(component_data.get(field))
+            supported_value = _filter_architecture_narrative(value, usable_architecture_claims)
+            if supported_value and not _is_generic_architecture_text(supported_value):
+                normalized_component[field] = supported_value
+        candidate_connections = {}
+        for field in ("connected_to", "communicates_with"):
+            values = [
+                str(value).strip() for value in _as_list(component_data.get(field))
+                if _useful_architecture_text(value) and not _is_generic_architecture_text(str(value))
+            ]
+            if values:
+                candidate_connections[field] = values
+        normalized_component["_candidate_connections"] = candidate_connections
+        components.append(normalized_component)
 
+    component_names = {_normalise_text(item["name"]): item["name"] for item in components}
+    verified_relationships = {
+        (_normalise_text(source), _normalise_text(target))
+        for source, target in (verified_relationships or set())
+    }
+    module_connection_status = module_connection_status or {}
+    for edge_source in components:
+        source_key = _normalise_text(edge_source["name"])
+        related_names = []
+        for field in ("connected_to", "communicates_with"):
+            for target in _as_list(edge_source.get("_candidate_connections", {}).get(field)):
+                target_name = str(target or "").strip()
+                target_key = _normalise_text(target_name)
+                if target_key not in component_names or target_key == source_key:
+                    continue
+                if (source_key, target_key) not in verified_relationships and not _claim_supports_relationship(
+                    edge_source["name"], target_name, usable_architecture_claims
+                ):
+                    continue
+                if target_key not in {_normalise_text(name) for name in related_names}:
+                    related_names.append(component_names[target_key])
+        if related_names:
+            edge_source["connected_to"] = related_names
+            edge_source["communicates_with"] = related_names
+            edge_source["connection_evidence_status"] = "verified"
+        else:
+            edge_source["connection_evidence_status"] = module_connection_status.get(source_key, "not_fully_assessed")
+        edge_source.pop("_candidate_connections", None)
     filtered["components"] = components
 
     # Keep flow/lifecycle entries only when a claim explicitly supports the
@@ -332,7 +389,7 @@ def _filter_architecture(
             else:
                 continue
 
-            if not text or not _claim_supports_label(text, usable_architecture_claims):
+            if not text or _is_generic_architecture_text(text) or not _claim_supports_label(text, usable_architecture_claims):
                 continue
 
             key = _normalise_text(text)
@@ -343,34 +400,86 @@ def _filter_architecture(
 
         filtered[field] = entries
 
+    for field in ("sync_path", "async_path"):
+        filtered[field] = [
+            text for item in _as_list(source.get(field))
+            if (text := _useful_architecture_text(item))
+            and not _is_generic_architecture_text(text)
+            and _claim_supports_label(text, usable_architecture_claims)
+        ]
+
     # Deployment should not imply a platform merely because a model supplied
     # a plausible deployment description.
+    architecture_type = _useful_architecture_text(source.get("architecture_type"))
+    filtered["architecture_type"] = (
+        architecture_type
+        if architecture_type and _claim_supports_label(architecture_type, usable_architecture_claims)
+        else ""
+    )
+
     deployment = source.get("deployment")
     if isinstance(deployment, str):
-        filtered["deployment"] = (
-            deployment
-            if _claim_supports_label(deployment, usable_architecture_claims)
-            else "unknown"
-        )
+        deployment = _useful_architecture_text(deployment)
+        filtered["deployment"] = deployment if deployment and _claim_supports_label(deployment, usable_architecture_claims) else ""
     elif isinstance(deployment, list):
         filtered["deployment"] = [
             item for item in deployment
             if isinstance(item, str)
+            and _useful_architecture_text(item)
+            and not _is_generic_architecture_text(item)
             and _claim_supports_label(item, usable_architecture_claims)
         ]
     elif isinstance(deployment, dict):
-        filtered["deployment"] = (
-            deployment
-            if _claim_supports_label(
-                " ".join(str(value) for value in deployment.values()),
-                usable_architecture_claims,
-            )
-            else "unknown"
-        )
+        details = {
+            key: value for key, value in deployment.items()
+            if isinstance(value, str)
+            and _useful_architecture_text(value)
+            and not _is_generic_architecture_text(value)
+            and _claim_supports_label(value, usable_architecture_claims)
+        }
+        filtered["deployment"] = details
     else:
-        filtered["deployment"] = "unknown"
+        filtered["deployment"] = ""
 
     return filtered
+
+
+def _useful_architecture_text(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = re.sub(r"\s+", " ", text).casefold().strip(" .!:")
+    placeholders = {
+        "unknown", "n/a", "not available", "not known",
+        UNKNOWN_EVIDENCE_MESSAGE.casefold().strip(" .!"),
+        "performs a specific runtime responsibility inferred from repository architecture evidence",
+    }
+    return "" if normalized in placeholders else text
+
+
+def _is_generic_architecture_text(value: str) -> bool:
+    text = re.sub(r"\s+", " ", value or "").casefold().strip(" .!:")
+    return not text or text in {
+        "unknown", "response", "request", "result", "data", "component",
+        "module", "service", "system", "performs a specific runtime responsibility inferred from repository architecture evidence",
+    } or "unable to confidently determine from repository evidence" in text
+
+
+def _claim_supports_relationship(source: str, target: str, claims: list) -> bool:
+    source_label = _normalise_text(source)
+    target_label = _normalise_text(target)
+    relationship_terms = {
+        "call", "calls", "import", "imports", "use", "uses", "connect", "connects",
+        "send", "sends", "write", "writes", "read", "reads", "store", "stores",
+        "route", "routes", "depend", "depends", "query", "queries", "invoke", "invokes",
+        "publish", "publishes", "consume", "consumes", "persist", "persists",
+    }
+    for claim in claims:
+        if not _claim_is_usable(claim) or not getattr(claim, "evidence", []):
+            continue
+        claim_text = _normalise_text(getattr(claim, "text", ""))
+        words = set(claim_text.split())
+        if source_label and target_label and source_label in claim_text and target_label in claim_text and words & relationship_terms:
+            return True
+    return False
 
 
 def _filter_executive_overview(executive: Any, valid_features: set) -> dict:
@@ -405,6 +514,7 @@ def _narrative_supported_by_claims(text: Any, claims: list) -> bool:
         "supports", "offers", "helps", "allows", "enables", "use", "using",
     }
 
+
     def tokens(value: Any) -> set[str]:
         if not isinstance(value, str):
             return set()
@@ -432,6 +542,12 @@ def _filter_narrative_sentences(text: Any, claims: list) -> str:
         return ""
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
     return " ".join(sentence for sentence in sentences if _narrative_supported_by_claims(sentence, claims))
+
+
+def _filter_architecture_narrative(text: str, claims: list) -> str:
+    """Filter architecture prose against evidence-backed architecture claims."""
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
+    return " ".join(sentence for sentence in sentences if _claim_supports_label(sentence, claims))
 
 
 @router.post("", response_model=AnalyzeResponse)
@@ -507,6 +623,34 @@ def analyze_repository(
                 )
 
             response.analysis_run_id = run_id
+
+            if response.status == "success":
+                missing_success_fields = []
+                if not isinstance(response.analysis_status, str) or not response.analysis_status.strip():
+                    missing_success_fields.append("analysis_status")
+                if not isinstance(response.repository_model, dict):
+                    missing_success_fields.append("repository_model")
+                if not isinstance(response.commit_sha, str) or not response.commit_sha.strip():
+                    missing_success_fields.append("commit_sha")
+                if missing_success_fields:
+                    emit(
+                        logger,
+                        "analysis_response_contract_failed",
+                        level=logging.ERROR,
+                        stage="response_serialization",
+                        repository=identity,
+                        missing_fields=missing_success_fields,
+                    )
+                    response = AnalyzeResponse(
+                        status="error",
+                        analysis_status="error",
+                        analysis_run_id=run_id,
+                        error_code="invalid_analysis_response",
+                        message=(
+                            "Analysis could not produce a valid response. Use correlation ID "
+                            f"{run_id} for diagnostics."
+                        ),
+                    )
 
             if response.status == "error":
                 emit(
@@ -952,6 +1096,11 @@ def _run_analysis(
             ai_analysis["architecture"] = _run_output_filter(_filter_architecture,
                 ai_analysis.get("architecture"),
                 repository_model.claims,
+                {(relation.source, relation.target) for relation in repository_model.relationships},
+                {
+                    _normalise_text(module.get("name")): module.get("connection_evidence_status", "not_fully_assessed")
+                    for module in ai_analysis.get("modules", []) if isinstance(module, dict) and module.get("name")
+                },
             )
 
             kept = valid_modules

@@ -86,6 +86,30 @@ def test_library_without_executable_entrypoint_can_have_sufficient_core_coverage
     assert bundle["coverage_gate"]["status"] == "sufficient"
 
 
+def test_gemma_receives_technology_stack_as_mapping_context_not_path_evidence(monkeypatch, tmp_path):
+    (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+    monkeypatch.setattr(context.settings, "openrouter_api_key", "test-key")
+    captured = {}
+
+    def fake_chat(_key, _model, messages):
+        captured["prompt"] = messages[1]["content"]
+        captured["user"] = json.loads(messages[1]["content"].split("\n", 1)[1])
+        return json.dumps({"purpose": "API application", "modules": [], "evidence_paths": ["main.py"]})
+
+    monkeypatch.setattr(context, "_chat", fake_chat)
+    context.prepare_context({}, {}, tmp_path, "abc", {
+        "detected_technology_stack": {"categories": {
+            "framework": [{"name": "FastAPI", "source": "requirements.txt", "evidence": "fastapi>=0.1"}],
+        }},
+    })
+
+    assert captured["user"]["technology_stack_hints"] == [{
+        "category": "framework", "name": "FastAPI",
+        "source": "requirements.txt", "evidence": "fastapi>=0.1",
+    }]
+    assert "not proof that a particular file implements a module" in captured["prompt"]
+
+
 def test_gemma_malformed_json_fails_closed(monkeypatch, tmp_path):
     (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
     monkeypatch.setattr(context.settings, "openrouter_api_key", "test-key")

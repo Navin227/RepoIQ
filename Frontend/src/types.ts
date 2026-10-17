@@ -89,6 +89,7 @@ export interface ArchitectureComponent {
   input?: string;
   output?: string;
   communicates_with?: string[];
+  connection_evidence_status?: 'verified' | 'verified_none' | 'not_fully_assessed' | string;
 }
 
 export interface ArchitectureAnalysis {

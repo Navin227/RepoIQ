@@ -375,6 +375,7 @@ export interface AnalyzeRepositoryResponse {
   status: 'success' | 'error';
   analysis_run_id?: string;
   error_code?: string;
+  error?: string;
   repo_name?: string;
   repo_url?: string;
   local_path?: string;
@@ -587,7 +588,7 @@ export async function analyzeRepository(
   let apiBase: string;
   try {
     apiBase = resolveApiBase({
-      configuredApiBase: import.meta.env.VITE_API_BASE_URL,
+      configuredApiBase: import.meta.env?.VITE_API_BASE_URL,
       runtimeApiBase,
       developmentApiBase: getDevelopmentApiBaseOverride(),
       pageOrigin: window.location.origin,
@@ -639,6 +640,13 @@ export async function analyzeRepository(
     }
     const result = rawResult as AnalyzeRepositoryResponse;
     const responseRunId = result.analysis_run_id || runId;
+    if (!response.ok || result.status === 'error' || (Boolean(result.error?.trim()) && result.status !== 'success')) {
+      const code = result.error_code || `http_${response.status}`;
+      const reason = result.error?.trim() || result.message?.trim() || result.error_code
+        || `Analysis failed. Correlation ID: ${responseRunId}`;
+      log('analysis_failed', { http_status: response.status, error_code: code, analysis_status: result.analysis_status || 'error' });
+      return { status: 'error', analysis_run_id: responseRunId, error: reason };
+    }
     log('api_response_parsed_snapshot', {
       response_status: result.status,
       analysis_status: result.analysis_status,
@@ -670,14 +678,22 @@ export async function analyzeRepository(
       log('api_response_schema_invalid', { missing_or_invalid_field: 'status' });
       return { status: 'error', analysis_run_id: runId, error: `Invalid analysis response. Correlation ID: ${runId}` };
     }
+    const missingSuccessFields = [
+      typeof result.analysis_status === 'string' && result.analysis_status.trim() ? null : 'analysis_status',
+      result.repository_model && typeof result.repository_model === 'object' && !Array.isArray(result.repository_model)
+        ? null : 'repository_model',
+      typeof result.commit_sha === 'string' && result.commit_sha.trim() ? null : 'commit_sha',
+    ].filter((field): field is string => Boolean(field));
+    if (missingSuccessFields.length) {
+      log('api_response_schema_invalid', { missing_fields: missingSuccessFields });
+      return {
+        status: 'error',
+        analysis_run_id: responseRunId,
+        error: `Invalid analysis response: missing ${missingSuccessFields.join(', ')}. Correlation ID: ${responseRunId}`,
+      };
+    }
     for (const field of ['analysis_status', 'repository_model', 'commit_sha']) {
       if (!(field in result)) log('api_response_field_missing', { field });
-    }
-    if (!response.ok || result.status !== 'success') {
-      const code = result.error_code || `http_${response.status}`;
-      log('analysis_failed', { http_status: response.status, error_code: code, analysis_status: result.analysis_status || 'error' });
-      return { status: 'error', analysis_run_id: responseRunId,
-        error: result.message || `Analysis failed. Correlation ID: ${responseRunId}` };
     }
 
     const modelCommitSha = typeof result.repository_model?.commit_sha === 'string'
@@ -699,9 +715,6 @@ export async function analyzeRepository(
       ['failed', 'malformed'].includes(pipelineDiagnostics[stage]?.status)
     ) || /(?:provider_failure|context_preparation_failure|malformed_output)/i.test(result.error_code || '');
     const missingValidationMetadata = !result.repository_model || !commitSha;
-    // Older API deployments may omit validation metadata even when they return
-    // a report. Preserve useful output and mark its missing source trace as
-    // partial; missing commit SHA alone must never turn the report into failed.
     const hasRecognizedStatus = ['complete', 'success', 'ai_generated', 'partial', 'unavailable', 'failed', 'degraded'].includes(result.analysis_status || '');
     const finalState = normalizeTerminalAnalysisStatus({
       backendStatus: result.analysis_status,

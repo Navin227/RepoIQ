@@ -923,6 +923,25 @@ class LLMService:
                 self._normalize_string_list(item.get("components"))
                 + self._normalize_string_list(item.get("evidence"))
             )
+            raw_claims = analysis.get("claims") if isinstance(analysis.get("claims"), list) else []
+            normalized_claim_name = re.sub(r"\s+", " ", name).casefold()
+            matching_module_claims = [
+                claim for claim in raw_claims
+                if isinstance(claim, dict)
+                and str(claim.get("category") or "").casefold() == "module"
+                and normalized_claim_name in {
+                    re.sub(r"\s+", " ", str(claim.get(key) or "")).casefold()
+                    for key in ("target_name", "subject")
+                }
+            ]
+            # When Grok omits a module's component list, its matching
+            # evidence-backed module claim is a safe fallback source of paths.
+            # The normal exact-inventory and functional-file checks below still
+            # decide which cited paths can appear on the card.
+            for claim in matching_module_claims:
+                for reference in claim.get("evidence", []) if isinstance(claim.get("evidence"), list) else []:
+                    if isinstance(reference, dict) and reference.get("path"):
+                        raw_components.append(str(reference["path"]))
             repository_map = (payload.get("context_bundle") or {}).get("repository_map") or {}
             if isinstance(repository_map, dict):
                 module_tokens = self._use_case_tokens(name + " " + purpose)
@@ -950,7 +969,16 @@ class LLMService:
                     supported_components.append(component.strip())
 
             supported_components = list(dict.fromkeys(supported_components))[:12]
-            if not supported_components:
+            has_supported_module_claim = any(
+                claim in matching_module_claims
+                and any(
+                    self._normalize_evidence_path(ref.get("path")).casefold() in known_paths
+                    for ref in claim.get("evidence", [])
+                    if isinstance(ref, dict) and ref.get("path")
+                )
+                for claim in (analysis.get("claims") or [])
+            ) if isinstance(analysis.get("claims"), list) else False
+            if not supported_components and not has_supported_module_claim:
                 continue
 
             capabilities = [
@@ -1106,13 +1134,9 @@ class LLMService:
             or architecture.get("summary")
             or ""
         ).strip()
-        architecture_type = str(
-            architecture.get("architecture_type") or ""
-        ).strip()
-        flow = self._normalize_string_list(architecture.get("flow"))
-        lifecycle = self._normalize_string_list(
-            architecture.get("request_lifecycle")
-        )
+        architecture_type = self._useful_architecture_text(architecture.get("architecture_type"))
+        flow = [value for value in self._normalize_string_list(architecture.get("flow")) if self._useful_architecture_text(value)]
+        lifecycle = [value for value in self._normalize_string_list(architecture.get("request_lifecycle")) if self._useful_architecture_text(value)]
 
         components = []
         known_repo_paths: set[str] = set()
@@ -1147,8 +1171,8 @@ class LLMService:
                     continue
 
                 name = str(item.get("name") or "").strip()
-                responsibility = str(item.get("responsibility") or "").strip()
-                if not name or not responsibility:
+                responsibility = self._useful_architecture_text(item.get("responsibility"))
+                if not name or not responsibility or name.casefold() in {"response", "request", "result", "data", "component", "module", "service", "system"}:
                     continue
 
                 component_ref = f"{name} {responsibility}".strip()
@@ -1169,39 +1193,40 @@ class LLMService:
                     continue
                 seen_components.add(key)
 
-                connected_to = self._normalize_string_list(
-                    item.get("connected_to")
-                )[:8]
-                communications = self._normalize_string_list(
-                    item.get("communicates_with")
-                )[:8]
-
-                components.append(
-                    {
-                        "name": name,
-                        "responsibility": responsibility,
-                        "input": str(item.get("input") or UNKNOWN).strip(),
-                        "output": str(item.get("output") or UNKNOWN).strip(),
-                        "communicates_with": communications or connected_to or [UNKNOWN],
-                        "connected_to": connected_to,
-                        "evidence": self._normalize_string_list(item.get("evidence"))[:8],
-                    }
-                )
+                component = {"name": name, "responsibility": responsibility}
+                for field in ("input", "output"):
+                    value = self._useful_architecture_text(item.get(field))
+                    if value:
+                        component[field] = value
+                for field in ("connected_to", "communicates_with"):
+                    values = [value for value in self._normalize_string_list(item.get(field)) if self._useful_architecture_text(value)]
+                    if values:
+                        component[field] = values[:8]
+                components.append(component)
 
         return {
-            "architecture_summary": summary or UNKNOWN,
-            "summary": summary or UNKNOWN,
-            "architecture_type": architecture_type or UNKNOWN,
-            "flow": flow or [UNKNOWN],
-            "request_lifecycle": lifecycle or [UNKNOWN],
-            "sync_path": self._normalize_string_list(architecture.get("sync_path")),
-            "async_path": self._normalize_string_list(architecture.get("async_path")),
+            "architecture_summary": self._useful_architecture_text(summary),
+            "summary": self._useful_architecture_text(summary),
+            "architecture_type": architecture_type,
+            "flow": flow,
+            "request_lifecycle": lifecycle,
+            "sync_path": [value for value in self._normalize_string_list(architecture.get("sync_path")) if self._useful_architecture_text(value)],
+            "async_path": [value for value in self._normalize_string_list(architecture.get("async_path")) if self._useful_architecture_text(value)],
             "components": components,
-            "communication": self._normalize_string_list(
-                architecture.get("communication")
-            ) or [UNKNOWN],
-            "deployment": str(architecture.get("deployment") or UNKNOWN).strip(),
+            "communication": [value for value in self._normalize_string_list(architecture.get("communication")) if self._useful_architecture_text(value)],
+            "deployment": self._useful_architecture_text(architecture.get("deployment")),
         }
+
+    @staticmethod
+    def _useful_architecture_text(value: Any) -> str:
+        text = str(value or "").strip()
+        normalized = re.sub(r"\s+", " ", text).casefold().strip(" .!:")
+        generic = {
+            "unknown", "n/a", "not available", "not known",
+            UNKNOWN.casefold().strip(" .!"),
+            "performs a specific runtime responsibility inferred from repository architecture evidence",
+        }
+        return "" if normalized in generic else text
 
     @staticmethod
     def _normalize_string_list(value: Any) -> List[str]:
