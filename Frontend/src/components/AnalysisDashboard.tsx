@@ -424,19 +424,6 @@ export default function AnalysisDashboard({ repo, onBackToSearch, onAnalyze, api
               </div>
             </div>
           </div>
-          {(executiveOverview.why_was_it_built || executiveOverview.why_is_it_valuable || executiveOverview.user_features.length > 0 || executiveOverview.who_is_this_for.length > 0) && (
-            <div className="grid gap-5 lg:grid-cols-2">
-              {(executiveOverview.why_was_it_built || executiveOverview.why_is_it_valuable) && <section className="space-y-4 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
-                {executiveOverview.why_was_it_built && <div><h4 className="mb-2 text-xs font-mono uppercase tracking-widest text-gray-500">Problem and Purpose</h4><p className="text-sm leading-relaxed text-gray-300">{executiveOverview.why_was_it_built}</p></div>}
-                {executiveOverview.why_is_it_valuable && <div><h4 className="mb-2 text-xs font-mono uppercase tracking-widest text-gray-500">Technical Value</h4><p className="text-sm leading-relaxed text-gray-300">{executiveOverview.why_is_it_valuable}</p></div>}
-              </section>}
-              {executiveOverview.user_features.length > 0 && <section className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
-                <h4 className="mb-3 text-xs font-mono uppercase tracking-widest text-gray-500">Implemented Capabilities</h4>
-                <ul className="space-y-3">{executiveOverview.user_features.map((feature, index) => <li key={`${feature.name}-${index}`}><h5 className="text-sm font-semibold text-white">{feature.name}</h5><p className="mt-1 text-sm leading-relaxed text-gray-400">{feature.description}</p>{getStringList(feature.evidence).length > 0 && <p className="mt-1 break-all font-mono text-[10px] text-gray-500">Evidence: {getStringList(feature.evidence).slice(0, 2).join(', ')}</p>}</li>)}</ul>
-              </section>}
-              {executiveOverview.who_is_this_for.length > 0 && <p className="text-sm text-gray-400 lg:col-span-2"><span className="font-semibold text-gray-300">Intended users: </span>{executiveOverview.who_is_this_for.join(' · ')}</p>}
-            </div>
-          )}
 
         </div>
       )}

@@ -12,6 +12,7 @@ from typing import List, Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -63,6 +64,70 @@ def _as_dict(value: Any) -> dict:
 def _as_list(value: Any) -> list:
     """Return a list for optional AI-generated collections."""
     return value if isinstance(value, list) else []
+
+
+def _upsert_repository_record(
+    db: Session,
+    repo_url: str,
+    metadata: dict | None = None,
+    *,
+    fallback_description: str | None = None,
+    fallback_language: str | None = None,
+) -> Repository:
+    """Persist canonical repository identity and any metadata already available."""
+    normalized_url = normalize_github_url(repo_url)
+    owner, repository_name = (
+        normalized_url.removeprefix("https://github.com/")
+        .removesuffix(".git")
+        .split("/", 1)
+    )
+    # GitHub repository paths are case-insensitive; fold the identity key so
+    # differently-cased input URLs still reuse the unique database record.
+    owner = owner.casefold()
+    repository_name = repository_name.casefold()
+    canonical_url = f"https://github.com/{owner}/{repository_name}.git"
+    metadata = metadata if isinstance(metadata, dict) else {}
+    full_name = metadata.get("full_name") or f"{owner}/{repository_name}"
+    description = metadata.get("description") or fallback_description
+    stars = metadata.get("stargazers_count")
+    language = metadata.get("language") or fallback_language
+
+    repository = db.scalar(
+        select(Repository).where(Repository.github_url == canonical_url)
+    )
+    is_new = repository is None
+    if repository is None:
+        repository = Repository(
+            github_url=canonical_url,
+            full_name=full_name,
+            description=description,
+            stars=stars if isinstance(stars, int) else 0,
+            primary_language=language,
+        )
+        db.add(repository)
+        try:
+            db.commit()
+        except IntegrityError:
+            # A concurrent analysis may have inserted this canonical URL after
+            # our lookup. The unique constraint remains the source of truth.
+            db.rollback()
+            repository = db.scalar(
+                select(Repository).where(Repository.github_url == canonical_url)
+            )
+            if repository is None:
+                raise
+
+    if is_new or metadata.get("full_name") or not repository.full_name:
+        repository.full_name = full_name
+    if description is not None:
+        repository.description = description
+    if isinstance(stars, int):
+        repository.stars = stars
+    if language is not None:
+        repository.primary_language = language
+    db.commit()
+    db.refresh(repository)
+    return repository
 
 
 def _narrative_count(executive: Any) -> int:
@@ -576,6 +641,7 @@ def _run_analysis(
     db: Session,
 ) -> AnalyzeResponse:
     try:
+        repository = None
         acquisition_started = time.perf_counter()
         emit(
             logger,
@@ -608,6 +674,10 @@ def _run_analysis(
             repository_metadata["readme_source"] = readme_source
 
         elif payload.repo_url:
+            # Save canonical identity before cloning or invoking model
+            # providers so an acquisition/analysis failure cannot erase the
+            # fact that this repository entered the workflow.
+            repository = _upsert_repository_record(db, payload.repo_url)
             clone_result = github_service.clone_repository(payload.repo_url)
             repo_path = Path(clone_result["local_path"])
             repo_name = clone_result["repo_name"]
@@ -633,6 +703,13 @@ def _run_analysis(
                     "topics": [],
                     "readme_source": "local_path",
                 }
+
+            repository = _upsert_repository_record(
+                db,
+                payload.repo_url,
+                repository_metadata,
+                fallback_description=description,
+            )
 
             readme_path, readme_source = github_service.find_readme_path(repo_path)
             readme_content = github_service.find_readme(repo_path)
@@ -1165,7 +1242,6 @@ def _run_analysis(
             if isinstance(item, dict) and item.get("name")
         ]
 
-        repository = None
         if payload.repo_url:
             persistence_started = time.perf_counter()
             emit(
@@ -1175,40 +1251,13 @@ def _run_analysis(
                 repository=repo_name,
                 commit_sha=commit_sha,
             )
-            repository_url = normalize_github_url(payload.repo_url)
-            repository = db.scalar(
-                select(Repository).where(
-                    Repository.github_url == repository_url
-                )
+            repository = _upsert_repository_record(
+                db,
+                payload.repo_url,
+                repository_metadata,
+                fallback_description=description,
+                fallback_language=(stack.get("languages") or [None])[0],
             )
-
-            if repository is None:
-                repository = Repository(
-                    github_url=repository_url,
-                    full_name=repository_metadata.get("full_name") or repo_name,
-                    description=(
-                        repository_metadata.get("description") or description
-                    ),
-                    stars=repository_metadata.get("stargazers_count") or 0,
-                    primary_language=repository_metadata.get("language")
-                    or (stack.get("languages") or [None])[0],
-                )
-                db.add(repository)
-                db.flush()
-            else:
-                repository.full_name = (
-                    repository_metadata.get("full_name") or repo_name
-                )
-                repository.description = (
-                    repository_metadata.get("description") or description
-                )
-                repository.stars = (
-                    repository_metadata.get("stargazers_count") or 0
-                )
-                repository.primary_language = (
-                    repository_metadata.get("language")
-                    or (stack.get("languages") or [None])[0]
-                )
 
             result = repository.analysis_result
             if result is None:
