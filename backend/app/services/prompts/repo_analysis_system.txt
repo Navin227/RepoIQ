@@ -291,7 +291,7 @@ Avoid generic descriptions such as "a powerful and scalable platform" unless the
 ### B. Executive Overview
 
 `what_is_this_project`:
-Explain the actual software, its primary purpose, and the main technical mechanism through which it operates.
+Write 2-4 concise, repository-specific paragraphs. Explain the actual software and problem, the main user-visible workflows, how its frontend/API/backend and important services work together, and relevant persistence, integrations, or processing behavior. Ground details in inspected source, README, routes, configuration, or other supplied evidence. Avoid technology inventories, generic claims, and unsupported scale or reliability language. Leave unsupported details out rather than adding uncertainty filler.
 
 `why_was_it_built`:
 Describe the problem the software appears intended to address. Distinguish verified evidence of intended purpose from a reasonable interpretation of the design.
@@ -305,10 +305,10 @@ Include meaningful user-visible or consumer-facing capabilities supported by imp
 Explain actual behavior, relevant inputs or outputs, and important constraints. Do not list dependencies or internal functions as user features unless they enable a demonstrable capability.
 
 `typical_use_cases`:
-Keep this existing field as a string array for API compatibility. Describe realistic scenarios enabled by verified functionality. Do not claim a use case is supported if its essential execution path is missing or unverified. When a use case is supported, the matching title and explanation may also appear in `end_user_use_cases`.
+Keep this existing field as a string array for API compatibility. Describe only concise, repository-specific scenarios enabled by verified functionality. Return an empty array when no concrete scenario is supported.
 
 `end_user_use_cases`:
-Return approximately 3–6 repository-specific end-user workflows when evidence supports them, and fewer when it does not. Each item must contain `title`, `description`, and `evidence` (repository-relative implementation paths). Explain the user's goal, the action supported by the code, and the outcome in 1–3 concise sentences. Build on the executive overview by combining capabilities only when the code demonstrates that they work together. Do not repeat the overview, enumerate endpoints, turn internal infrastructure into a user benefit, or invent login, payments, uploads, exports, or other behavior. Omit generic filler rather than padding the list. Every cited path must be an inspected implementation path supplied in the context.
+Keep this legacy field empty (`[]`) for response compatibility. Do not generate or display use-case cards.
 
 `who_is_this_for`:
 Identify likely users or consumers based on the interfaces and functionality. Label inferred audiences appropriately.
@@ -371,16 +371,16 @@ Do not force six modules if fewer can be established.
 ### E. Architecture
 
 `architecture_summary`:
-Summarize the overall architecture and how its major parts cooperate.
+Summarize the overall architecture and how its major parts cooperate when the supplied evidence establishes that structure. Use an empty string when it cannot be described specifically; do not insert an uncertainty message.
 
 `architecture_type`:
-Use a specific architectural classification only when supported by source evidence. Otherwise use a qualified description.
+Use a specific architectural classification only when supported by source evidence. Use an empty string when no useful classification is supported.
 
 `flow`:
-Explain the principal end-to-end processing flow in its actual order.
+Explain the principal end-to-end processing flow in its actual order. Return an empty array when the flow cannot be traced.
 
 `request_lifecycle`:
-Trace request or execution processing through the visible entry point, validation, logic, dependencies, and output. Adapt to the repository's actual application type.
+Trace request or execution processing through the visible entry point, validation, logic, dependencies, and output. Adapt to the repository's actual application type. Return an empty array when no useful lifecycle is evidenced.
 
 `components`:
 For each component, explain:
@@ -392,12 +392,13 @@ For each component, explain:
 - `connected_to`
 
 Include only real, relevant components and evidence-supported connections.
+Omit generic labels such as `Response`, `Request`, `Component`, or `Module`, and omit generic responsibilities. A supported component with no verified connections may remain with empty connection arrays. Include a connection only when source evidence establishes the interaction; do not infer one from names. Use empty input/output strings when those details are not established. Never use `Unknown`, `N/A`, `not assessed`, or uncertainty prose as placeholder values.
 
 `communication`:
-Explain how components exchange information, including function calls, HTTP, sockets, queues, events, shared storage, or other mechanisms only when evidenced.
+Explain how components exchange information, including function calls, HTTP, sockets, queues, events, shared storage, or other mechanisms only when evidenced. Return an empty array when no mechanism is established.
 
 `deployment`:
-Describe verified deployment configuration and runtime assumptions. If deployment files or runtime evidence are unavailable, explicitly state that deployment cannot be fully verified. Do not infer a production deployment from source code alone.
+Describe verified deployment configuration and runtime assumptions. Use an empty string when deployment files or runtime evidence are unavailable. Do not infer a production deployment from source code alone.
 
 ### F. Technical Analysis
 
@@ -515,9 +516,7 @@ Return one valid JSON object containing exactly these top-level fields:
       }
     ],
     "typical_use_cases": [],
-    "end_user_use_cases": [
-      {"title": "string", "description": "string", "evidence": ["repository/relative/path"]}
-    ],
+    "end_user_use_cases": [],
     "who_is_this_for": "string",
     "why_is_it_valuable": "string",
     "one_line_summary": "string"

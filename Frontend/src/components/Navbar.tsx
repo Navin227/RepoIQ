@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { GitBranch, User, Menu, X, ArrowRight, Github, Sparkles, BookMarked, Layers, Square, Loader2 } from 'lucide-react';
+import { GitBranch, User, Menu, X, ArrowRight, Github, Sparkles, Layers, Square, Loader2 } from 'lucide-react';
 
 interface DemoStatusResponse {
   state?: 'running' | 'pending' | 'stopping' | 'stopped' | 'shutting-down' | 'terminated' | string;
@@ -16,7 +16,6 @@ interface NavbarProps {
   currentTab: string;
   setCurrentTab: (tab: string) => void;
   onNavigateHome: () => void;
-  savedCount: number;
   adminToken?: string;
   demoStatus?: DemoStatusResponse | null;
   isDemoLoading?: boolean;
@@ -27,7 +26,6 @@ export default function Navbar({
   currentTab, 
   setCurrentTab, 
   onNavigateHome, 
-  savedCount,
   adminToken = '',
   demoStatus = null,
   isDemoLoading = false,
@@ -39,7 +37,6 @@ export default function Navbar({
     { id: 'home', label: 'Home' },
     { id: 'explore', label: 'Explore' },
     { id: 'analyze', label: 'Analyze' },
-    { id: 'saved', label: 'Saved', count: savedCount }
   ];
 
   // Determine if demo is currently running
@@ -84,11 +81,6 @@ export default function Navbar({
               >
                 <span className="relative z-10 flex items-center gap-1.5">
                   {item.label}
-                  {item.count !== undefined && item.count > 0 && (
-                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[#8B5CF6] px-1 text-[10px] font-bold text-white">
-                      {item.count}
-                    </span>
-                  )}
                 </span>
                 {currentTab === item.id && (
                   <div className="absolute bottom-[-17px] left-0 right-0 h-[2px] bg-gradient-to-r from-[#8B5CF6] to-pink-500 rounded-full" />
@@ -156,11 +148,6 @@ export default function Navbar({
             >
               <div className="flex items-center justify-between">
                 <span>{item.label}</span>
-                {item.count !== undefined && item.count > 0 && (
-                  <span className="rounded-full bg-[#8B5CF6] px-2 py-0.5 text-xs font-bold text-white">
-                    {item.count}
-                  </span>
-                )}
               </div>
             </button>
           ))}

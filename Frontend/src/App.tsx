@@ -6,7 +6,6 @@ import DemoInfrastructureCard from './components/DemoInfrastructureCard';
 import SearchResults from './components/SearchResults';
 import AnalysisDashboard from './components/AnalysisDashboard';
 import AnalysisDiagnosticsBoundary from './components/AnalysisDiagnosticsBoundary';
-import { getOrCreateRepository } from './data';
 import {
   analyzeRepository,
   searchRepositories,
@@ -16,7 +15,6 @@ import { SimilarRepo, Repository } from './types';
 import {
   Star,
   GitFork,
-  BookMarked,
   Sparkles,
 } from 'lucide-react';
 
@@ -377,13 +375,8 @@ export default function App() {
     useRef(false);
 
   // ──────────────────────────────────────────────
-  // Saved repositories
   // ──────────────────────────────────────────────
 
-  const [savedRepoNames, setSavedRepoNames] =
-    useState<Set<string>>(
-      new Set(['vercel/next.js'])
-    );
 
   // ──────────────────────────────────────────────
   // Demo Infrastructure State
@@ -708,24 +701,8 @@ export default function App() {
   };
 
   // ──────────────────────────────────────────────
-  // Saved Repository Toggle
   // ──────────────────────────────────────────────
 
-  const handleSaveToggle = (
-    fullName: string
-  ) => {
-    setSavedRepoNames(prev => {
-      const next = new Set(prev);
-
-      if (next.has(fullName)) {
-        next.delete(fullName);
-      } else {
-        next.add(fullName);
-      }
-
-      return next;
-    });
-  };
 
   // ──────────────────────────────────────────────
   // Demo Infrastructure Status
@@ -1469,45 +1446,7 @@ export default function App() {
     };
 
   // ──────────────────────────────────────────────
-  // Saved repositories
   // ──────────────────────────────────────────────
-
-  const getSavedRepositories =
-    (): SimilarRepo[] => {
-      const list: SimilarRepo[] =
-        [];
-
-      savedRepoNames.forEach(
-        name => {
-          const repo =
-            getOrCreateRepository(
-              name
-            );
-
-          list.push({
-            fullName:
-              repo.fullName,
-
-            description:
-              repo.description,
-
-            stars:
-              repo.stars ?? 0,
-
-            forks:
-              repo.forks ?? 0,
-
-            language:
-              repo.language ?? '',
-
-            topics:
-              repo.topics ?? [],
-          });
-        }
-      );
-
-      return list;
-    };
 
   // ──────────────────────────────────────────────
   // Render
@@ -1525,9 +1464,6 @@ export default function App() {
         }
         onNavigateHome={
           handleBackToHome
-        }
-        savedCount={
-          savedRepoNames.size
         }
         adminToken={
           adminToken
@@ -1841,12 +1777,6 @@ export default function App() {
                 repo={
                   analyzedRepo
                 }
-                isSaved={savedRepoNames.has(
-                  analyzedRepo.fullName
-                )}
-                onSaveToggle={
-                  handleSaveToggle
-                }
                 onAnalyze={
                   handleAnalyze
                 }
@@ -1872,132 +1802,9 @@ export default function App() {
             </div>
           )}
 
-        {/* SAVED LIBRARY */}
-        {currentTab ===
-          'saved' && (
-            <div
-              className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-12 animate-fade-in"
-              id="saved-repositories-page"
-            >
-              <div className="border-b border-white/[0.08] pb-6 mb-8">
-                <h1 className="text-3xl font-extrabold tracking-tight text-white font-sans">
-                  Saved Repository Library
-                </h1>
-
-                <p className="text-sm text-gray-400 mt-1.5 font-sans">
-                  Review and inspect your saved project reports quickly
-                </p>
-              </div>
-
-              {getSavedRepositories()
-                .length === 0 ? (
-                <div className="text-center py-20 rounded-3xl bg-white/[0.01] border border-dashed border-white/[0.08]">
-                  <BookMarked className="h-12 w-12 text-gray-500 mx-auto mb-4" />
-
-                  <h3 className="text-lg font-bold text-white font-sans">
-                    Your Saved Library is Empty
-                  </h3>
-
-                  <p className="text-xs text-gray-400 mt-1 max-w-sm mx-auto font-sans leading-relaxed">
-                    Start scanning repositories and hit the &quot;Save Repository&quot; button to back up report blueprints here for instant access.
-                  </p>
-
-                  <button
-                    onClick={() =>
-                      setCurrentTab(
-                        'home'
-                      )
-                    }
-                    className="mt-6 px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-purple-600 text-sm font-semibold text-white shadow"
-                  >
-                    Start Scanning
-                  </button>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {getSavedRepositories().map(
-                    repo => (
-                      <div
-                        key={
-                          repo.fullName
-                        }
-                        className="flex flex-col justify-between p-6 rounded-2xl bg-white/[0.02] border border-white/[0.08] hover:border-[#8B5CF6]/30 hover:bg-[#8B5CF6]/[0.01] transition-all duration-300"
-                      >
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <BookMarked className="h-4.5 w-4.5 text-indigo-400 shrink-0" />
-
-                            <h3 className="text-base font-bold text-white font-mono break-all line-clamp-1">
-                              {
-                                repo.fullName
-                              }
-                            </h3>
-                          </div>
-
-                          <p className="text-xs text-gray-400 leading-relaxed mt-2.5 line-clamp-2">
-                            {
-                              repo.description
-                            }
-                          </p>
-
-                          <div className="flex flex-wrap gap-1 mt-3">
-                            {repo.topics
-                              .slice(
-                                0,
-                                3
-                              )
-                              .map(
-                                top => (
-                                  <span
-                                    key={
-                                      top
-                                    }
-                                    className="text-[10px] text-[#8B5CF6] font-mono bg-[#8B5CF6]/5 px-2 py-0.5 rounded border border-[#8B5CF6]/10"
-                                  >
-                                    #
-                                    {
-                                      top
-                                    }
-                                  </span>
-                                )
-                              )}
-                          </div>
-                        </div>
-
-                        <div className="mt-6 pt-4 border-t border-white/[0.04] flex items-center justify-between">
-                          <div className="flex items-center gap-3 text-[11px] text-gray-400 font-mono">
-                            <span className="flex items-center gap-0.5">
-                              <Star className="h-3.5 w-3.5 text-amber-500 fill-amber-500" />
-                              {repo.stars.toLocaleString()}
-                            </span>
-
-                            <span className="flex items-center gap-0.5">
-                              <GitFork className="h-3.5 w-3.5 text-blue-400" />
-                              {repo.forks.toLocaleString()}
-                            </span>
-                          </div>
-
-                          <button
-                            onClick={() =>
-                              handleAnalyze(
-                                repo.fullName
-                              )
-                            }
-                            disabled={!analysisApiAvailable}
-                            className="px-3 py-1.5 rounded-lg bg-white/[0.04] text-[11px] font-semibold text-white hover:bg-[#8B5CF6] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Inspect Code
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
-            </div>
-          )}
       </main>
 
+      {currentTab !== 'analyze' && <>
       {/* Footer */}
       <footer
         className="border-t border-white/[0.05] bg-black/30 py-8 px-4"
@@ -2052,6 +1859,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      </>}
     </div>
   );
 }

@@ -5,7 +5,7 @@ import {
   Clock, Trash2, ChevronDown, ArrowRight 
 } from 'lucide-react';
 import { SimilarRepo } from '../types';
-import { filterSearchResultsInBackendOrder, formatEvidenceReadiness } from './search-ranking';
+import { filterSearchResultsInBackendOrder } from './search-ranking';
 
 interface SearchResultsProps {
   query: string;
@@ -314,7 +314,6 @@ export default function SearchResults({ query, results, isLoading, error, analyz
     const safeName = String(repo.name ?? '');
     const safeDescription = String(repo.description ?? '');
     const safeLanguage = String(repo.language ?? 'Unknown');
-    const evidenceLabel = formatEvidenceReadiness(repo.evidence_readiness, repo.tree_inspection_state);
 
     const safeTopics = Array.isArray(repo.topics)
       ? repo.topics.map(topic => String(topic ?? '')).filter(Boolean)
@@ -370,11 +369,7 @@ export default function SearchResults({ query, results, isLoading, error, analyz
             </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-mono">
-              <span className={`rounded-md border px-2 py-1 ${repo.evidence_readiness === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : repo.evidence_readiness === 'unknown' || repo.tree_inspection_state === 'inspection_failed' ? 'border-amber-500/20 bg-amber-500/5 text-amber-300' : 'border-white/10 bg-white/[0.03] text-gray-400'}`}>
-                Analysis evidence: {evidenceLabel}
-              </span>
               {typeof repo.relevance_score === 'number' && <span className="text-gray-500">Relevance {repo.relevance_score}</span>}
-              {repo.tree_inspection_state && repo.tree_inspection_state !== 'inspected' && <span className="text-amber-400">Tree {repo.tree_inspection_state.replaceAll('_', ' ')}</span>}
             </div>
 
             {/* Tag Topics List */}

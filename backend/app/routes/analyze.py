@@ -261,22 +261,22 @@ def _filter_architecture(
 
     if not usable_architecture_claims:
         return {
-            "architecture_summary": UNKNOWN_EVIDENCE_MESSAGE,
-            "summary": UNKNOWN_EVIDENCE_MESSAGE,
-            "architecture_type": "unknown",
+            "architecture_summary": "",
+            "summary": "",
+            "architecture_type": "",
             "flow": [],
             "request_lifecycle": [],
             "components": [],
             "communication": [],
-            "deployment": "unknown",
+            "deployment": "",
         }
 
     filtered = dict(source)
     summary = str(source.get("architecture_summary") or source.get("summary") or "").strip()
     if summary:
         supported_summary = _filter_narrative_sentences(summary, usable_architecture_claims)
-        filtered["architecture_summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
-        filtered["summary"] = supported_summary or UNKNOWN_EVIDENCE_MESSAGE
+        filtered["architecture_summary"] = supported_summary
+        filtered["summary"] = supported_summary
 
     # Component-level validation: do not keep every component merely because
     # another architecture claim passed validation.
@@ -297,7 +297,16 @@ def _filter_architecture(
         else:
             continue
 
-        if not name or not _claim_supports_label(name, usable_architecture_claims):
+        responsibility = str(component_data.get("responsibility") or "").strip()
+        placeholder_text = {"unknown", "n/a", "not assessed", UNKNOWN_EVIDENCE_MESSAGE.casefold()}
+        if (
+            not name
+            or not responsibility
+            or name.casefold() in {"response", "request", "component", "module", *placeholder_text}
+            or responsibility.casefold() in placeholder_text
+            or "specific runtime responsibility inferred" in responsibility.casefold()
+            or not _claim_supports_label(name, usable_architecture_claims)
+        ):
             continue
 
         key = _normalise_text(name)
@@ -306,6 +315,32 @@ def _filter_architecture(
         seen_components.add(key)
         components.append(component_data)
 
+    supported_component_names = {
+        str(component.get("name") or "").strip().casefold()
+        for component in components
+    }
+    for component in components:
+        source_name = str(component.get("name") or "").strip()
+        for field in ("connected_to", "communicates_with"):
+            targets = []
+            for target in _as_list(component.get(field)):
+                target_name = str(target or "").strip()
+                if target_name.casefold() not in supported_component_names:
+                    continue
+                source_normalized = _normalise_text(source_name)
+                target_normalized = _normalise_text(target_name)
+                has_relationship_evidence = any(
+                    _claim_is_usable(claim)
+                    and bool(getattr(claim, "evidence", []))
+                    and str(getattr(claim, "category", "") or "").casefold()
+                    in {"data_flow", "integration", "relationship", "flow"}
+                    and source_normalized in _normalise_text(getattr(claim, "text", ""))
+                    and target_normalized in _normalise_text(getattr(claim, "text", ""))
+                    for claim in usable_architecture_claims
+                )
+                if has_relationship_evidence and target_name not in targets:
+                    targets.append(target_name)
+            component[field] = targets
     filtered["components"] = components
 
     # Keep flow/lifecycle entries only when a claim explicitly supports the
@@ -349,7 +384,7 @@ def _filter_architecture(
         filtered["deployment"] = (
             deployment
             if _claim_supports_label(deployment, usable_architecture_claims)
-            else "unknown"
+            else ""
         )
     elif isinstance(deployment, list):
         filtered["deployment"] = [
@@ -364,10 +399,10 @@ def _filter_architecture(
                 " ".join(str(value) for value in deployment.values()),
                 usable_architecture_claims,
             )
-            else "unknown"
+            else ""
         )
     else:
-        filtered["deployment"] = "unknown"
+        filtered["deployment"] = ""
 
     return filtered
 
@@ -913,9 +948,9 @@ def _run_analysis(
             if not valid_overview_claims:
                 ai_analysis["overview"] = ""
                 executive["what_is_this_project"] = []
-                executive["why_was_it_built"] = UNKNOWN_EVIDENCE_MESSAGE
-                executive["why_is_it_valuable"] = UNKNOWN_EVIDENCE_MESSAGE
-                executive["one_line_summary"] = UNKNOWN_EVIDENCE_MESSAGE
+                executive["why_was_it_built"] = ""
+                executive["why_is_it_valuable"] = ""
+                executive["one_line_summary"] = ""
                 executive["typical_use_cases"] = []
                 executive["end_user_use_cases"] = []
                 executive["who_is_this_for"] = []
@@ -931,7 +966,7 @@ def _run_analysis(
                     "why_was_it_built", "why_is_it_valuable", "one_line_summary"
                 ):
                     value = executive.get(field)
-                    executive[field] = _filter_narrative_sentences(value, valid_overview_claims) or UNKNOWN_EVIDENCE_MESSAGE
+                    executive[field] = _filter_narrative_sentences(value, valid_overview_claims)
                 for field in ("typical_use_cases", "who_is_this_for"):
                     executive[field] = [
                         retained for item in _as_list(executive.get(field))

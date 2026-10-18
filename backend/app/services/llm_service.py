@@ -1108,16 +1108,32 @@ class LLMService:
     def _normalize_architecture(
         self, architecture: Dict[str, Any], payload: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
+        def clean_text(value: Any) -> str:
+            value_text = str(value or "").strip()
+            lowered = value_text.casefold()
+            if (
+                self._is_generic_analysis_text(value_text)
+                or lowered in {UNKNOWN.casefold(), "unknown", "n/a", "not assessed"}
+                or "specific runtime responsibility inferred" in lowered
+            ):
+                return ""
+            return value_text
+
+        def clean_list(value: Any) -> List[str]:
+            return [item for item in self._normalize_string_list(value) if clean_text(item)]
+
         summary = str(
             architecture.get("architecture_summary")
             or architecture.get("summary")
             or ""
         ).strip()
+        summary = clean_text(summary)
         architecture_type = str(
             architecture.get("architecture_type") or ""
         ).strip()
-        flow = self._normalize_string_list(architecture.get("flow"))
-        lifecycle = self._normalize_string_list(
+        architecture_type = clean_text(architecture_type)
+        flow = clean_list(architecture.get("flow"))
+        lifecycle = clean_list(
             architecture.get("request_lifecycle")
         )
 
@@ -1154,8 +1170,12 @@ class LLMService:
                     continue
 
                 name = str(item.get("name") or "").strip()
-                responsibility = str(item.get("responsibility") or "").strip()
-                if not name or not responsibility:
+                responsibility = clean_text(item.get("responsibility"))
+                if (
+                    not name
+                    or not responsibility
+                    or name.casefold() in {"response", "request", "component", "module", "unknown"}
+                ):
                     continue
 
                 component_ref = f"{name} {responsibility}".strip()
@@ -1176,10 +1196,10 @@ class LLMService:
                     continue
                 seen_components.add(key)
 
-                connected_to = self._normalize_string_list(
+                connected_to = clean_list(
                     item.get("connected_to")
                 )[:8]
-                communications = self._normalize_string_list(
+                communications = clean_list(
                     item.get("communicates_with")
                 )[:8]
 
@@ -1187,27 +1207,27 @@ class LLMService:
                     {
                         "name": name,
                         "responsibility": responsibility,
-                        "input": str(item.get("input") or UNKNOWN).strip(),
-                        "output": str(item.get("output") or UNKNOWN).strip(),
-                        "communicates_with": communications or connected_to or [UNKNOWN],
+                        **({"input": clean_text(item.get("input"))} if clean_text(item.get("input")) else {}),
+                        **({"output": clean_text(item.get("output"))} if clean_text(item.get("output")) else {}),
+                        "communicates_with": communications,
                         "connected_to": connected_to,
                         "evidence": self._normalize_string_list(item.get("evidence"))[:8],
                     }
                 )
 
         return {
-            "architecture_summary": summary or UNKNOWN,
-            "summary": summary or UNKNOWN,
-            "architecture_type": architecture_type or UNKNOWN,
-            "flow": flow or [UNKNOWN],
-            "request_lifecycle": lifecycle or [UNKNOWN],
-            "sync_path": self._normalize_string_list(architecture.get("sync_path")),
-            "async_path": self._normalize_string_list(architecture.get("async_path")),
+            "architecture_summary": summary,
+            "summary": summary,
+            "architecture_type": architecture_type,
+            "flow": flow,
+            "request_lifecycle": lifecycle,
+            "sync_path": clean_list(architecture.get("sync_path")),
+            "async_path": clean_list(architecture.get("async_path")),
             "components": components,
-            "communication": self._normalize_string_list(
+            "communication": clean_list(
                 architecture.get("communication")
-            ) or [UNKNOWN],
-            "deployment": str(architecture.get("deployment") or UNKNOWN).strip(),
+            ),
+            "deployment": clean_text(architecture.get("deployment")),
         }
 
     @staticmethod
@@ -1301,11 +1321,19 @@ class LLMService:
     def _normalize_executive_overview(
         self, data: Any, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
+        def clean_text(value: Any) -> str:
+            candidate = str(value or "").strip()
+            if self._is_generic_analysis_text(candidate) or candidate.casefold() in {
+                UNKNOWN.casefold(), "unknown", "n/a", "not assessed"
+            }:
+                return ""
+            return candidate
+
         if not isinstance(data, dict):
             return {
-                "what_is_this_project": [], "why_was_it_built": UNKNOWN,
+                "what_is_this_project": [], "why_was_it_built": "",
                 "user_features": [], "typical_use_cases": [], "end_user_use_cases": [], "who_is_this_for": [],
-                "why_is_it_valuable": UNKNOWN, "one_line_summary": UNKNOWN,
+                "why_is_it_valuable": "", "one_line_summary": "",
             }
 
         paragraphs = data.get("what_is_this_project", [])
@@ -1327,7 +1355,7 @@ class LLMService:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("name") or "").strip()
-                description = str(item.get("description") or "").strip()
+                description = clean_text(item.get("description"))
                 raw_evidence = item.get("evidence", [])
                 if isinstance(raw_evidence, str):
                     raw_evidence = [raw_evidence]
@@ -1360,85 +1388,36 @@ class LLMService:
         use_cases = data.get("typical_use_cases", [])
         if isinstance(use_cases, str):
             use_cases = [use_cases]
-        raw_end_user_cases = data.get("end_user_use_cases", use_cases)
-        if isinstance(raw_end_user_cases, (str, dict)):
-            raw_end_user_cases = [raw_end_user_cases]
-        end_user_cases = []
         legacy_use_cases = [
             str(item).strip() for item in use_cases
             if isinstance(item, str) and str(item).strip()
             and not self._is_generic_analysis_text(str(item))
         ] if isinstance(use_cases, list) else []
-        seen_use_cases: set[str] = set()
-        seen_use_case_titles: set[str] = set()
-        if isinstance(raw_end_user_cases, list):
-            for item in raw_end_user_cases:
-                if isinstance(item, dict):
-                    title = str(item.get("title") or "").strip()
-                    description = str(item.get("description") or "").strip()
-                    raw_case_evidence = item.get("evidence", [])
-                    if isinstance(raw_case_evidence, str):
-                        raw_case_evidence = [raw_case_evidence]
-                    supported_case_evidence = [
-                        str(reference).strip()
-                        for reference in raw_case_evidence if isinstance(reference, str)
-                        and (
-                            self._normalize_evidence_path(reference).casefold() in feature_paths
-                            or self._normalize_evidence_path(reference, route=True).casefold() in feature_paths
-                        )
-                    ] if isinstance(raw_case_evidence, list) else []
-                else:
-                    title = ""
-                    description = str(item or "").strip()
-                    supported_case_evidence = []
-                normalized_description = re.sub(r"\s+", " ", description).casefold()
-                normalized_title = re.sub(r"\s+", " ", title).casefold()
-                if (
-                    not description
-                    or self._is_generic_analysis_text(description)
-                    or (title and self._is_generic_analysis_text(title))
-                    or normalized_description in seen_use_cases
-                    or (normalized_title and normalized_title in seen_use_case_titles)
-                    or (title and not supported_case_evidence)
-                ):
-                    continue
-                seen_use_cases.add(normalized_description)
-                if normalized_title:
-                    seen_use_case_titles.add(normalized_title)
-                if normalized_description not in {item.casefold() for item in legacy_use_cases}:
-                    legacy_use_cases.append(description)
-                if title:
-                    end_user_cases.append({"title": title, "description": description, "evidence": list(dict.fromkeys(supported_case_evidence))[:4]})
         audiences = data.get("who_is_this_for", [])
         if isinstance(audiences, str):
             audiences = [audiences]
 
         normalized = {
             "what_is_this_project": [
-                str(item).strip()
+                clean_text(item)
                 for item in paragraphs
-                if str(item).strip()
+                if clean_text(item)
             ][:3],
-            "why_was_it_built": str(
-                data.get("why_was_it_built") or ""
-            ).strip(),
+            "why_was_it_built": clean_text(data.get("why_was_it_built")),
             "user_features": features[:8],
             "typical_use_cases": [
-                str(item).strip()
+                clean_text(item)
                 for item in legacy_use_cases
+                if clean_text(item)
             ][:6],
-            "end_user_use_cases": end_user_cases[:6],
+            "end_user_use_cases": [],
             "who_is_this_for": [
-                str(item).strip()
+                clean_text(item)
                 for item in audiences
-                if str(item).strip()
+                if clean_text(item)
             ][:6] if isinstance(audiences, list) else [],
-            "why_is_it_valuable": str(
-                data.get("why_is_it_valuable") or ""
-            ).strip(),
-            "one_line_summary": str(
-                data.get("one_line_summary") or ""
-            ).strip(),
+            "why_is_it_valuable": clean_text(data.get("why_is_it_valuable")),
+            "one_line_summary": clean_text(data.get("one_line_summary")),
         }
 
         return normalized

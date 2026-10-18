@@ -449,6 +449,28 @@ def test_llm_service_drops_architecture_components_without_repo_evidence():
     assert [component["name"] for component in analysis["architecture"]["components"]] == ["API Gateway"]
 
 
+def test_architecture_normalizer_drops_generic_components_and_unknown_text():
+    architecture = LLMService()._normalize_architecture({
+        "architecture_summary": "Unable to confidently determine from repository evidence.",
+        "architecture_type": "unknown",
+        "flow": ["Unknown", "UI submits requests to the API"],
+        "components": [
+            {"name": "Response", "responsibility": "Performs a specific runtime responsibility inferred from repository architecture evidence."},
+            {"name": "API", "responsibility": "Routes requests to backend services.", "input": "Unknown", "connected_to": [], "communicates_with": []},
+        ],
+        "deployment": "not assessed",
+    })
+
+    assert architecture["architecture_summary"] == ""
+    assert architecture["architecture_type"] == ""
+    assert architecture["flow"] == ["UI submits requests to the API"]
+    assert [component["name"] for component in architecture["components"]] == ["API"]
+    assert "input" not in architecture["components"][0]
+    assert architecture["components"][0]["connected_to"] == []
+    assert architecture["components"][0]["communicates_with"] == []
+    assert architecture["deployment"] == ""
+
+
 def test_generic_named_module_with_strong_source_evidence_is_retained():
     service = LLMService()
     payload = {
@@ -551,7 +573,7 @@ def test_modules_exclude_artifacts_and_only_report_import_verified_connections()
     assert "Infrastructure" not in modules["Order API"]["connected_modules"]
 
 
-def test_end_user_use_cases_are_titled_evidence_backed_and_deduplicated():
+def test_end_user_use_cases_remain_empty_for_api_compatibility():
     service = LLMService()
     payload = {
         "source_evidence": {"selected_source_file_details": [{"path": "src/pdf.py", "role": "service"}]},
@@ -565,11 +587,7 @@ def test_end_user_use_cases_are_titled_evidence_backed_and_deduplicated():
             {"title": "Convert files", "description": "Convert supported files between formats.", "evidence": ["README.md"]},
         ],
     }, payload)
-    assert normalized["end_user_use_cases"] == [{
-        "title": "Prepare a PDF for sharing",
-        "description": "Compress a PDF to reduce its file size before sharing.",
-        "evidence": ["src/pdf.py"],
-    }]
+    assert normalized["end_user_use_cases"] == []
 
 
 def test_gemini_input_budget_records_omissions_and_removes_duplicate_tree():

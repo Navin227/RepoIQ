@@ -76,6 +76,37 @@ def test_architecture_keeps_verified_claims_across_categories_and_generic_names(
     assert result["flow"] == ["Checkout submits an order"]
 
 
+def test_architecture_omits_placeholders_and_unverified_connections():
+    claims = [SimpleNamespace(
+        state="confirmed", category="architecture",
+        text="The React UI renders repository results.", target_name="React UI",
+        subject="", evidence=[object()],
+    )]
+    result = _filter_architecture({
+        "architecture_summary": "Unable to confidently determine from repository evidence.",
+        "components": [
+            {"name": "React UI", "responsibility": "Renders repository results.", "connected_to": ["API Gateway"]},
+            {"name": "Response", "responsibility": "Performs a specific runtime responsibility inferred from repository architecture evidence."},
+        ],
+    }, claims)
+
+    assert [item["name"] for item in result["components"]] == ["React UI"]
+    assert result["components"][0]["connected_to"] == []
+    assert result["architecture_summary"] == ""
+
+
+def test_architecture_without_supported_claims_uses_empty_optional_values():
+    result = _filter_architecture({
+        "summary": "Unable to confidently determine from repository evidence.",
+        "components": [{"name": "Response", "responsibility": "Unknown"}],
+    }, [])
+
+    assert result["architecture_summary"] == ""
+    assert result["architecture_type"] == ""
+    assert result["components"] == []
+    assert result["deployment"] == ""
+
+
 def test_coverage_filter_distinguishes_partial_ranges_and_keeps_valid_reference():
     claims = [{
         "text": "Creates orders", "confidence": 0.8,
