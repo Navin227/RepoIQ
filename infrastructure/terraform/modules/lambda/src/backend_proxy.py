@@ -45,22 +45,35 @@ def _is_allowed_route(method: str, path: str) -> bool:
 
 
 def _running_instance_public_ip() -> str | None:
-    response = ec2.describe_instances(
-        Filters=[
-            {"Name": "tag:Project", "Values": [PROJECT_NAME]},
-            {"Name": "tag:Environment", "Values": [ENVIRONMENT]},
-            {"Name": "tag:ManagedBy", "Values": ["RepoIQ-ControlPlane"]},
-            {"Name": "tag:Role", "Values": ["Demo"]},
-            {"Name": "tag:Name", "Values": ["RepoIQ-demo"]},
-            {"Name": "instance-state-name", "Values": ["running"]},
-        ]
-    )
-    instances = [
-        instance
-        for reservation in response.get("Reservations", [])
-        for instance in reservation.get("Instances", [])
-        if instance.get("PublicIpAddress")
+    demo_filters = [
+        {"Name": "tag:Project", "Values": [PROJECT_NAME]},
+        {"Name": "tag:ManagedBy", "Values": ["RepoIQ-ControlPlane"]},
+        {"Name": "tag:Role", "Values": ["Demo"]},
+        {"Name": "tag:Name", "Values": ["RepoIQ-demo"]},
+        {"Name": "instance-state-name", "Values": ["running"]},
     ]
+
+    def find_instances(filters: list[dict]) -> list[dict]:
+        response = ec2.describe_instances(Filters=filters)
+        return [
+            instance
+            for reservation in response.get("Reservations", [])
+            for instance in reservation.get("Instances", [])
+        ]
+
+    instances = find_instances(
+        [{"Name": "tag:Environment", "Values": [ENVIRONMENT]}, *demo_filters]
+    )
+    if not instances:
+        instances = find_instances(demo_filters)
+        if instances:
+            logger.warning(
+                "Found running RepoIQ demo instance despite Environment tag mismatch "
+                "(proxy_environment=%s).",
+                ENVIRONMENT,
+            )
+
+    instances = [instance for instance in instances if instance.get("PublicIpAddress")]
     if not instances:
         return None
     if len(instances) > 1:
@@ -136,6 +149,13 @@ def lambda_handler(event, context):
         return _response(502, {"detail": "Could not resolve the running RepoIQ backend."})
 
     if not public_ip:
+        logger.error(
+            "Backend unavailable: no running demo instance with a public IP matched "
+            "proxy configuration (project=%s, environment=%s, route=%s).",
+            PROJECT_NAME,
+            ENVIRONMENT,
+            path,
+        )
         return _response(503, {"detail": "RepoIQ demo server is not running."})
 
     raw_query = event.get("rawQueryString") or ""
@@ -157,9 +177,21 @@ def lambda_handler(event, context):
 
     try:
         with urlopen(request, timeout=timeout) as upstream_response:
+            logger.info(
+                "Backend request completed (method=%s, route=%s, upstream_status=%s).",
+                method,
+                path,
+                upstream_response.status,
+            )
             return _backend_response(upstream_response)
     except HTTPError as error:
         with error:
+            logger.error(
+                "Backend returned HTTP error (method=%s, route=%s, upstream_status=%s).",
+                method,
+                path,
+                error.code,
+            )
             return _backend_response(error, error.code)
     except URLError as error:
         if isinstance(error.reason, (TimeoutError, socket.timeout)):

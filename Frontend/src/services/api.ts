@@ -570,8 +570,42 @@ export async function analyzeRepository(
     try {
       rawResult = await response.json();
     } catch (error) {
+      if (!response.ok) {
+        log('api_http_error_body_invalid_json', {
+          http_status: response.status,
+          error_type: error instanceof Error ? error.name : 'UnknownError',
+        });
+        return {
+          status: 'error',
+          analysis_run_id: runId,
+          error: `Analysis service returned HTTP ${response.status}. Correlation ID: ${runId}`,
+        };
+      }
       log('api_response_json_invalid', { http_status: response.status, error_type: error instanceof Error ? error.name : 'UnknownError' });
       return { status: 'error', analysis_run_id: runId, error: `Invalid analysis response. Correlation ID: ${runId}` };
+    }
+    if (!response.ok) {
+      const errorBody = rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult)
+        ? rawResult as Record<string, unknown>
+        : {};
+      const detail = typeof errorBody.detail === 'string'
+        ? errorBody.detail
+        : typeof errorBody.message === 'string'
+          ? errorBody.message
+          : undefined;
+      const errorCode = typeof errorBody.error_code === 'string'
+        ? errorBody.error_code
+        : `http_${response.status}`;
+      log('api_http_error_response', {
+        http_status: response.status,
+        error_code: errorCode,
+        detail,
+      });
+      return {
+        status: 'error',
+        analysis_run_id: runId,
+        error: `${detail || `Analysis service returned HTTP ${response.status}`}. Correlation ID: ${runId}`,
+      };
     }
     if (!rawResult || typeof rawResult !== 'object' || Array.isArray(rawResult)) {
       log('api_response_schema_invalid', { received_type: Array.isArray(rawResult) ? 'array' : typeof rawResult });
@@ -613,8 +647,8 @@ export async function analyzeRepository(
     for (const field of ['analysis_status', 'repository_model', 'commit_sha']) {
       if (!(field in result)) log('api_response_field_missing', { field });
     }
-    if (!response.ok || result.status !== 'success') {
-      const code = result.error_code || `http_${response.status}`;
+    if (result.status !== 'success') {
+      const code = result.error_code || 'analysis_error';
       log('analysis_failed', { http_status: response.status, error_code: code, analysis_status: result.analysis_status || 'error' });
       return { status: 'error', analysis_run_id: responseRunId,
         error: result.message || `Analysis failed. Correlation ID: ${responseRunId}` };

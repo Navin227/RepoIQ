@@ -31,6 +31,28 @@ class FakeEC2:
         }
 
 
+class EnvironmentMismatchEC2:
+    def __init__(self) -> None:
+        self.filters_seen = []
+
+    def describe_instances(self, Filters: list[dict]) -> dict:
+        self.filters_seen.append(Filters)
+        if any(item["Name"] == "tag:Environment" for item in Filters):
+            return {"Reservations": []}
+        return {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "PublicIpAddress": "203.0.113.20",
+                            "LaunchTime": "2026-10-18T00:00:00Z",
+                        }
+                    ]
+                }
+            ]
+        }
+
+
 class FakeResponse:
     status = 200
     headers = {"Content-Type": "application/json"}
@@ -182,3 +204,14 @@ def test_missing_running_instance_returns_service_unavailable(monkeypatch) -> No
     response = backend_proxy.lambda_handler(_event("GET", "/health"), None)
 
     assert response["statusCode"] == 503
+    assert response["body"] == '{"detail": "RepoIQ demo server is not running."}'
+
+
+def test_running_demo_is_found_when_environment_tag_differs(monkeypatch) -> None:
+    fake_ec2 = EnvironmentMismatchEC2()
+    monkeypatch.setattr(backend_proxy, "ec2", fake_ec2)
+
+    assert backend_proxy._running_instance_public_ip() == "203.0.113.20"
+    assert len(fake_ec2.filters_seen) == 2
+    assert any(item["Name"] == "tag:Environment" for item in fake_ec2.filters_seen[0])
+    assert not any(item["Name"] == "tag:Environment" for item in fake_ec2.filters_seen[1])

@@ -9,6 +9,7 @@ from app.services.llm_service import LLMService
 from app.services import llm_service as llm_service_module
 from app.services import analysis_context
 from app.services.similar_repo_service import SimilarRepoService
+from app.routes import analyze as analyze_route
 
 
 def test_llm_service_parses_structured_gemini_json(monkeypatch):
@@ -215,6 +216,10 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     body = response.json()
     assert body["status"] == "success"
     assert body["analysis_run_id"] == "run_gofile_test"
+    assert isinstance(body["analysis_status"], str) and body["analysis_status"]
+    assert isinstance(body["repository_model"], dict)
+    assert "commit_sha" in body
+    assert "commit_sha" in body["repository_model"]
     assert '"event":"analysis_request_received"' in caplog.text
     assert '"event":"repository_model_build_completed"' in caplog.text
     assert '"event":"response_schema_validated"' in caplog.text
@@ -227,6 +232,33 @@ def test_analyze_endpoint_uses_ai_generation_for_gofile(monkeypatch, caplog):
     assert body["similar_repositories"][0]["fullName"] == "appwrite/appwrite"
     assert "stages" in body["analysis_evidence"]["pipeline_diagnostics"]["output_filtering"]
     assert "validation_diagnostics" in body["repository_model"]
+
+
+def test_analyze_endpoint_returns_correlated_error_envelope_on_unhandled_failure(monkeypatch, caplog):
+    caplog.set_level(logging.ERROR)
+
+    def fail_analysis(*_args):
+        raise RuntimeError("controlled backend failure")
+
+    monkeypatch.setattr(analyze_route, "_run_analysis", fail_analysis)
+    response = TestClient(app).post(
+        "/analyze",
+        json={
+            "repo_url": "https://github.com/example/repository",
+            "analysis_run_id": "run_controlled_failure",
+        },
+        headers={"X-Analysis-Run-Id": "run_controlled_failure"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["analysis_status"] == "error"
+    assert body["analysis_run_id"] == "run_controlled_failure"
+    assert body["error_code"] == "analysis_failed:RuntimeError"
+    assert "run_controlled_failure" in body["message"]
+    assert '"event":"analysis_request_failed"' in caplog.text
+    assert "controlled backend failure" in caplog.text
 
 
 def test_repo_scanner_finds_nested_readme(tmp_path):
